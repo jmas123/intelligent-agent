@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Deadline Agent</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="widget">
+    <!-- Header -->
+    <div id="header">
+      <span id="header-title">Deadline Agent</span>
+      <div id="header-controls">
+        <button id="btn-refresh" title="Refresh" onclick="refreshCurrentTab()">&#x21bb;</button>
+        <button id="btn-minimize" title="Hide (Cmd+Shift+D)" onclick="pywebview.api.hide_window && window.close()">&#x2715;</button>
+      </div>
+    </div>
+
+    <!-- Tab bar -->
+    <div id="tabs">
+      <button class="tab active" data-tab="dashboard" onclick="switchTab('dashboard')">
+        <span class="tab-icon">&#x1f4cb;</span>
+        <span class="tab-label">Tasks</span>
+      </button>
+      <button class="tab" data-tab="chat" onclick="switchTab('chat')">
+        <span class="tab-icon">&#x1f4ac;</span>
+        <span class="tab-label">Chat</span>
+      </button>
+      <button class="tab" data-tab="insights" onclick="switchTab('insights')">
+        <span class="tab-icon">&#x1f4a1;</span>
+        <span class="tab-label">Insights</span>
+      </button>
+      <button class="tab" data-tab="actions" onclick="switchTab('actions')">
+        <span class="tab-icon">&#x1f4c5;</span>
+        <span class="tab-label">Actions</span>
+      </button>
+      <button class="tab" data-tab="digest" onclick="switchTab('digest')">
+        <span class="tab-icon">&#x2600;</span>
+        <span class="tab-label">Digest</span>
+      </button>
+      <button class="tab" data-tab="patterns" onclick="switchTab('patterns')">
+        <span class="tab-icon">&#x1f9e0;</span>
+        <span class="tab-label">Patterns</span>
+      </button>
+      <button class="tab" data-tab="recruiting" onclick="switchTab('recruiting')">
+        <span class="tab-icon">&#x1f4bc;</span>
+        <span class="tab-label">Pipeline</span>
+      </button>
+    </div>
+
+    <!-- Content panels -->
+    <div id="content">
+      <!-- Dashboard -->
+      <div id="panel-dashboard" class="panel active">
+        <div id="dashboard-loading" class="loading">Loading tasks...</div>
+        <div id="dashboard-content"></div>
+      </div>
+
+      <!-- Chat -->
+      <div id="panel-chat" class="panel">
+        <div id="chat-messages"></div>
+        <div id="chat-input-area">
+          <input type="text" id="chat-input" placeholder="Ask about your deadlines..."
+                 onkeydown="if(event.key==='Enter')sendChat()">
+          <button id="chat-send" onclick="sendChat()">&#x27a4;</button>
+        </div>
+      </div>
+
+      <!-- Insights -->
+      <div id="panel-insights" class="panel">
+        <div id="insights-loading" class="loading">Loading insights...</div>
+        <div id="insights-content"></div>
+      </div>
+
+      <!-- Actions -->
+      <div id="panel-actions" class="panel">
+        <div id="actions-loading" class="loading">Loading actions...</div>
+        <div id="actions-content"></div>
+      </div>
+
+      <!-- Digest -->
+      <div id="panel-digest" class="panel">
+        <div id="digest-loading" class="loading">Loading digest...</div>
+        <div id="digest-content"></div>
+      </div>
+
+      <!-- Patterns -->
+      <div id="panel-patterns" class="panel">
+        <div id="patterns-loading" class="loading">Loading patterns...</div>
+        <div id="patterns-content"></div>
+      </div>
+
+      <!-- Recruiting Pipeline -->
+      <div id="panel-recruiting" class="panel">
+        <div id="recruiting-loading" class="loading">Loading pipeline...</div>
+        <div id="recruiting-content"></div>
+      </div>
+    </div>
+
+    <!-- Connection status -->
+    <div id="status-bar">
+      <span id="connection-status">Connecting...</span>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
