@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from deadline_agent.models import BehavioralPattern, FileActivity, LifeContext, Task
@@ -64,6 +64,134 @@ def _format_pattern(p: BehavioralPattern) -> str:
             return f"You tend to start {p.pattern_key}s less than a day before the deadline"
         return f"You typically start {p.pattern_key}s {days:.1f} days before the deadline"
 
+    if p.pattern_type == "focus_quality":
+        status = data.get("status", "normal")
+        saves = data.get("save_count", 0)
+        avg = data.get("avg_change_per_save", 0)
+        if status == "stuck":
+            return (
+                f"Low focus on {p.pattern_key}: {saves} saves with ~{avg:.0f} bytes net change each "
+                f"(many saves, little output change)"
+            )
+        if status == "productive":
+            return f"High focus on {p.pattern_key}: productive output ({avg:.0f} bytes/save)"
+        return ""  # Don't surface "normal" patterns
+
+    if p.pattern_type == "outgoing_tone":
+        if p.pattern_key == "message_length":
+            avg_len = data.get("avg_snippet_length", 0)
+            count = data.get("message_count", 0)
+            if avg_len < 50:
+                return f"Your recent messages are unusually short (~{avg_len:.0f} chars, {count} messages)"
+            return ""
+        if p.pattern_key == "response_latency":
+            hours = data.get("avg_response_latency_hours", 0)
+            if hours > 12:
+                return f"Your average reply time increased to {hours:.1f} hours"
+            return ""
+        return ""
+
+    if p.pattern_type == "session_fragmentation":
+        frag = data.get("avg_fragmentation", 0)
+        avg_dur = data.get("avg_session_duration_min", 0)
+        if frag > 0.5:
+            return (
+                f"Your sessions averaged {avg_dur:.0f} min with frequent file switching "
+                f"— fragmented work pattern"
+            )
+        if frag < 0.1 and avg_dur > 30:
+            return f"Sustained focus: sessions averaged {avg_dur:.0f} min with minimal switching"
+        return ""
+
+    # Phase 25: Recruiting analytics
+    if p.pattern_type == "recruiting_response_rate":
+        total = data.get("total", 0)
+        rate = data.get("rate", 0)
+        responded = data.get("responded", 0)
+        if p.pattern_key == "overall":
+            return f"Overall recruiting response rate: {rate:.0%} ({responded}/{total} applications)"
+        label = p.pattern_key.replace("tier:", "").replace("method:", "")
+        prefix = "Tier" if p.pattern_key.startswith("tier:") else "Method"
+        return f"{prefix} '{label}' response rate: {rate:.0%} ({responded}/{total})"
+
+    if p.pattern_type == "recruiting_over_index":
+        dominant = data.get("dominant", "?")
+        pct = data.get("pct", 0)
+        dom_rate = data.get("response_rate_dominant", 0)
+        other_rate = data.get("response_rate_others", 0)
+        return (
+            f"Over-indexing alert: {pct:.0f}% of applications target {dominant} "
+            f"(response rate {dom_rate:.0%} vs {other_rate:.0%} for others)"
+        )
+
+    if p.pattern_type == "recruiting_tier_gap":
+        count = data.get("count", 0)
+        total = data.get("total", 0)
+        if count == 0:
+            return f"Gap: 0 applications to {p.pattern_key} companies (out of {total} total)"
+        pct = data.get("pct", 0)
+        return f"Underweight: only {count} applications ({pct:.0f}%) to {p.pattern_key} companies"
+
+    if p.pattern_type == "recruiting_resume_effectiveness":
+        rate = data.get("rate", 0)
+        total = data.get("total", 0)
+        responded = data.get("responded", 0)
+        return f"Resume variant '{p.pattern_key}': {rate:.0%} response rate ({responded}/{total})"
+
+    if p.pattern_type == "recruiting_temporal":
+        rate = data.get("rate", 0)
+        total = data.get("total", 0)
+        if p.pattern_key.startswith("day:"):
+            day_name = data.get("day_name", p.pattern_key)
+            return f"Applications sent on {day_name}s: {rate:.0%} response rate ({total} sent)"
+        bucket = data.get("bucket", p.pattern_key)
+        return f"Applications sent in {bucket}: {rate:.0%} response rate ({total} sent)"
+
+    if p.pattern_type == "recruiting_fit_score":
+        company = data.get("company", p.pattern_key)
+        score = data.get("score", 0)
+        rank = data.get("rank", "?")
+        factors = data.get("matching_factors", [])
+        factors_str = f" ({', '.join(factors)})" if factors else ""
+        return f"#{rank} fit: {company} — score {score:.0%}{factors_str}"
+
+    # Phase 24: Task affect
+    if p.pattern_type == "task_affect":
+        lag = data.get("mean_start_lag_pct", 0.5)
+        no_work = data.get("no_work_rate", 0)
+        completion = data.get("completion_rate", 0)
+        if no_work > 0.5:
+            return (
+                f"You show an anxiety pattern with {p.pattern_key}s — "
+                f"{no_work:.0%} are left untouched"
+            )
+        if lag > 0.9:
+            return (
+                f"You show an avoidance pattern with {p.pattern_key}s — "
+                f"you consistently start in the final {1 - lag:.0%} of available time"
+            )
+        if lag < 0.3 and completion > 0.8:
+            return (
+                f"You enjoy working on {p.pattern_key}s — "
+                f"you typically start early and complete them reliably"
+            )
+        return ""
+
+    if p.pattern_type == "energy_proxy":
+        avg_gap = data.get("avg_gap_minutes", 0)
+        energy = data.get("energy_label", "neutral")
+        if energy == "draining":
+            return (
+                f"Working on {p.pattern_key}s appears draining — "
+                f"you take long breaks afterward (avg {avg_gap:.0f}min gap)"
+            )
+        if energy == "energizing":
+            return (
+                f"{p.pattern_key.capitalize()}s seem energizing — "
+                f"you often start another task right after (avg {avg_gap:.0f}min gap)"
+            )
+        return ""
+
     return f"[{p.pattern_type}] {p.pattern_key}: {p.value}"
 
 
@@ -82,6 +210,29 @@ class StateSnapshot:
     life_contexts: list[LifeContext] = field(default_factory=list)
     total_pending: int = 0
     total_done: int = 0
+    health_signals: dict[str, object] = field(default_factory=dict)
+    stale_applications: list[dict[str, object]] = field(
+        default_factory=list
+    )
+    # Phase 15: Genuine reasoning context
+    compressed_history: str = ""
+    causal_statements: list[str] = field(default_factory=list)
+    tradeoff_statements: list[str] = field(default_factory=list)
+    longitudinal_context: str = ""
+    spike_predictions: list[str] = field(default_factory=list)
+    # Phase 17: Identity model
+    identity_context: str = ""
+    # Phase 18: Focus quality + physical inference
+    absence_signals: list[str] = field(default_factory=list)
+    # Phase 19: Intention tracking + decision memory
+    goal_gaps: list[str] = field(default_factory=list)
+    recent_decisions: list[str] = field(default_factory=list)
+    # Phase 20: Social graph
+    relationship_alerts: list[str] = field(default_factory=list)
+    # Phase 24: Task affect
+    task_affect_context: list[str] = field(default_factory=list)
+    # Phase 25: Recruiting analytics
+    recruiting_analytics: list[str] = field(default_factory=list)
 
     def to_prompt(self) -> str:
         """Format snapshot as structured text for LLM input."""
@@ -89,6 +240,11 @@ class StateSnapshot:
         lines: list[str] = [f"Current time: {local_now.strftime('%A, %B %d %Y %I:%M %p %Z')}"]
         lines.append(f"Tasks: {self.total_pending} pending, {self.total_done} completed")
         lines.append("")
+
+        if self.identity_context:
+            lines.append("ABOUT YOU (durable identity):")
+            lines.append(self.identity_context)
+            lines.append("")
 
         if self.overdue:
             lines.append(f"OVERDUE ({len(self.overdue)}):")
@@ -143,7 +299,13 @@ class StateSnapshot:
                 else:
                     time_range = "All day"
                 loc = f" @ {location}" if location else ""
-                lines.append(f"  - {time_range}: {summary}{loc}")
+                attendees = [
+                    a.get("displayName") or a.get("email", "")
+                    for a in ev.get("attendees", [])
+                    if not a.get("self")
+                ]
+                att = f" [attendees: {', '.join(attendees)}]" if attendees else ""
+                lines.append(f"  - {time_range}: {summary}{loc}{att}")
             lines.append("")
 
         if self.recent_file_activity:
@@ -171,6 +333,111 @@ class StateSnapshot:
                 desc = _format_pattern(p)
                 if desc:
                     lines.append(f"  - {desc}")
+
+        if self.health_signals or self.absence_signals:
+            lines.append("")
+            lines.append("HEALTH SIGNALS:")
+            ln = self.health_signals.get("late_night_days", 0)
+            if ln:
+                lines.append(
+                    f"  - {ln} late-night work sessions (1-5 AM) "
+                    f"in the past 7 days"
+                )
+            zd = self.health_signals.get("zero_activity_days", 0)
+            if zd:
+                lines.append(
+                    f"  - {zd} days with zero file activity this week"
+                )
+            # Sleep inference
+            sleep_start = self.health_signals.get("sleep_window_avg_start")
+            sleep_end = self.health_signals.get("sleep_window_avg_end")
+            sleep_hours = self.health_signals.get("sleep_hours_avg")
+            sleep_consistency = self.health_signals.get("sleep_consistency")
+            if sleep_start and sleep_end:
+                consistency_note = f" ({sleep_consistency})" if sleep_consistency else ""
+                hours_note = f", ~{sleep_hours}h" if sleep_hours else ""
+                lines.append(
+                    f"  - Inferred sleep: {sleep_start} - {sleep_end}"
+                    f"{hours_note}{consistency_note}"
+                )
+            all_nighters = self.health_signals.get("all_nighter_dates", [])
+            if all_nighters:
+                dates = ", ".join(str(d) for d in all_nighters)  # type: ignore[union-attr]
+                lines.append(f"  - All-nighter(s) detected: {dates}")
+            # Absence signals
+            for signal in self.absence_signals:
+                lines.append(f"  - {signal}")
+
+        if self.goal_gaps:
+            lines.append("")
+            lines.append(f"INTENTION vs BEHAVIOR ({len(self.goal_gaps)}):")
+            for gap in self.goal_gaps:
+                lines.append(f"  - {gap}")
+
+        if self.recent_decisions:
+            lines.append("")
+            lines.append(f"DECISION HISTORY ({len(self.recent_decisions)}):")
+            for d in self.recent_decisions:
+                lines.append(f"  - {d}")
+
+        if self.relationship_alerts:
+            lines.append("")
+            lines.append(f"RELATIONSHIP SIGNALS ({len(self.relationship_alerts)}):")
+            for alert in self.relationship_alerts:
+                lines.append(f"  - {alert}")
+
+        if self.task_affect_context:
+            lines.append("")
+            lines.append(f"TASK AFFECT ({len(self.task_affect_context)}):")
+            for ctx in self.task_affect_context:
+                lines.append(f"  - {ctx}")
+
+        if self.recruiting_analytics:
+            lines.append("")
+            lines.append(f"RECRUITING ANALYTICS ({len(self.recruiting_analytics)}):")
+            for ra in self.recruiting_analytics:
+                lines.append(f"  - {ra}")
+
+        if self.stale_applications:
+            lines.append("")
+            lines.append(
+                f"STALE APPLICATIONS ({len(self.stale_applications)} "
+                f"awaiting follow-up):"
+            )
+            for app in self.stale_applications:
+                lines.append(
+                    f"  - {app['company']}: {app['status']}, "
+                    f"no signal in {app['days_since']} days"
+                )
+
+        # Phase 15: Genuine reasoning sections
+        if self.causal_statements:
+            lines.append("")
+            lines.append("CAUSAL ANALYSIS:")
+            for stmt in self.causal_statements:
+                lines.append(f"  - {stmt}")
+
+        if self.tradeoff_statements:
+            lines.append("")
+            lines.append("PRIORITY TRADEOFFS:")
+            for stmt in self.tradeoff_statements:
+                lines.append(f"  - {stmt}")
+
+        if self.compressed_history:
+            lines.append("")
+            lines.append("RECENT WEEKS (compressed history):")
+            lines.append(self.compressed_history)
+
+        if self.longitudinal_context:
+            lines.append("")
+            lines.append("CROSS-SEMESTER PATTERNS:")
+            lines.append(self.longitudinal_context)
+
+        if self.spike_predictions:
+            lines.append("")
+            lines.append("WORKLOAD SPIKE PREDICTIONS:")
+            for pred in self.spike_predictions:
+                lines.append(f"  - {pred}")
 
         return "\n".join(lines)
 
@@ -294,13 +561,24 @@ def build_state_snapshot(session: Session) -> StateSnapshot:
     end_of_today = (sod + timedelta(days=1)).astimezone(UTC).isoformat()
     end_of_week = (sod + timedelta(days=7)).astimezone(UTC).isoformat()
 
-    # Tasks due today
+    # Tasks due today (from now to end of local day — past-due items are in overdue)
     due_today = list(
         session.scalars(
             select(Task)
             .where(Task.status == "pending")
-            .where(Task.due_date_iso >= start_of_today)
+            .where(Task.due_date_iso >= now_iso)
             .where(Task.due_date_iso < end_of_today)
+            .order_by(Task.due_date_iso.asc())
+        ).all()
+    )
+
+    # Also include tasks that were due earlier today but haven't been completed
+    due_earlier_today = list(
+        session.scalars(
+            select(Task)
+            .where(Task.status == "pending")
+            .where(Task.due_date_iso >= start_of_today)
+            .where(Task.due_date_iso < now_iso)
             .order_by(Task.due_date_iso.asc())
         ).all()
     )
@@ -316,7 +594,10 @@ def build_state_snapshot(session: Session) -> StateSnapshot:
         ).all()
     )
 
-    # Overdue tasks
+    # Merge: tasks due earlier today go into due_today, not overdue
+    due_today = due_earlier_today + due_today
+
+    # Overdue tasks (due before start of today — yesterday or earlier)
     overdue = list(
         session.scalars(
             select(Task)
@@ -362,6 +643,221 @@ def build_state_snapshot(session: Session) -> StateSnapshot:
     except Exception:
         pass  # Contexts unavailable — proceed without them
 
+    # Health signals: late-night work and zero-activity days
+    health_signals: dict[str, object] = {}
+    try:
+        seven_ago = (now - timedelta(days=7)).isoformat()
+        recent_ts = list(
+            session.scalars(
+                select(FileActivity.modified_at).where(
+                    FileActivity.created_at >= seven_ago
+                )
+            ).all()
+        )
+        late_dates: set[str] = set()
+        for ts in recent_ts:
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            local = ts.astimezone(USER_TZ)
+            if 1 <= local.hour <= 4:
+                late_dates.add(local.strftime("%Y-%m-%d"))
+        active_days_stmt = (
+            select(func.date(FileActivity.created_at))
+            .where(FileActivity.created_at >= seven_ago)
+            .group_by(func.date(FileActivity.created_at))
+        )
+        active_day_count = len(
+            list(session.execute(active_days_stmt).all())
+        )
+        zero_days = max(0, 7 - active_day_count)
+        if late_dates or zero_days >= 2:
+            health_signals = {
+                "late_night_days": len(late_dates),
+                "zero_activity_days": zero_days,
+            }
+    except Exception:
+        pass
+
+    # Stale recruiting applications (no signal in 7+ days, not closed)
+    stale_apps: list[dict[str, object]] = []
+    try:
+        from deadline_agent.store.recruiting_repository import (
+            RecruitingRepository,
+        )
+
+        recruiting_repo = RecruitingRepository(session)
+        for app in recruiting_repo.list_active():
+            if app.last_signal_at:
+                signal_dt = app.last_signal_at
+                if signal_dt.tzinfo is None:
+                    signal_dt = signal_dt.replace(tzinfo=UTC)
+                days = (now - signal_dt).days
+                if days >= 7:
+                    stale_apps.append(
+                        {
+                            "company": app.company_name,
+                            "status": app.status,
+                            "days_since": days,
+                        }
+                    )
+    except Exception:
+        pass
+
+    # Phase 17: Identity model
+    identity_context = ""
+    try:
+        from deadline_agent.store.identity_repository import IdentityRepository
+
+        identity_repo = IdentityRepository(session)
+        identity_context = identity_repo.get_markdown()
+    except Exception:
+        pass
+
+    # Phase 18: Sleep inference
+    try:
+        from deadline_agent.awareness.physical_inference import infer_sleep_signals
+
+        sleep_signals = infer_sleep_signals(session)
+        health_signals.update(sleep_signals)
+    except Exception:
+        pass
+
+    # Phase 18: Absence detection
+    absence_signals: list[str] = []
+    try:
+        from deadline_agent.awareness.absence_detector import detect_absences
+
+        absence_signals = detect_absences(session)
+    except Exception:
+        pass
+
+    # Phase 19: Goal gaps
+    goal_gaps: list[str] = []
+    try:
+        from deadline_agent.awareness.goal_tracker import compute_goal_gaps
+
+        goal_gaps = compute_goal_gaps(session)
+    except Exception:
+        pass
+
+    # Phase 19: Recent decisions
+    recent_decisions: list[str] = []
+    try:
+        import json as _json
+
+        from deadline_agent.store.decision_repository import DecisionRepository
+
+        decision_repo = DecisionRepository(session)
+        for d in decision_repo.list_recent(limit=5):
+            outcome_note = ""
+            if d.outcome:
+                outcome_note = f" → outcome: {d.outcome}"
+            days_ago = (now - d.created_at.replace(tzinfo=UTC)).days
+            recent_decisions.append(
+                f"{days_ago}d ago: {d.description} (chose: {d.chosen_option}){outcome_note}"
+            )
+    except Exception:
+        pass
+
+    # Phase 20: Relationship alerts
+    relationship_alerts: list[str] = []
+    try:
+        from deadline_agent.awareness.social_graph import compute_relationship_alerts
+
+        relationship_alerts = compute_relationship_alerts(session)
+    except Exception:
+        pass
+
+    # Phase 24: Task affect context
+    task_affect_context: list[str] = []
+    try:
+        from deadline_agent.awareness.task_affect import get_intervention, get_task_affect_map
+
+        affect_map = get_task_affect_map(session)
+        for task_type, affect in affect_map.items():
+            if affect.affect_label == "neutral":
+                continue
+            intervention = get_intervention(affect.affect_label)
+            ctx = f"You {affect.affect_label.replace('_', ' ')} {task_type}s"
+            if intervention:
+                ctx += f" — {intervention}"
+            task_affect_context.append(ctx)
+    except Exception:
+        pass
+
+    # Phase 25: Recruiting analytics from behavioral patterns
+    recruiting_analytics: list[str] = []
+    try:
+        recruiting_pattern_types = {
+            "recruiting_response_rate", "recruiting_over_index",
+            "recruiting_tier_gap", "recruiting_resume_effectiveness",
+            "recruiting_temporal", "recruiting_fit_score",
+        }
+        for p in patterns:
+            if p.pattern_type in recruiting_pattern_types:
+                desc = _format_pattern(p)
+                if desc:
+                    recruiting_analytics.append(desc)
+    except Exception:
+        pass
+
+    # Phase 15: Genuine reasoning context
+    compressed_history = ""
+    causal_statements: list[str] = []
+    tradeoff_statements: list[str] = []
+    longitudinal_context = ""
+    spike_predictions: list[str] = []
+
+    try:
+        from deadline_agent.memory.context_compression import build_tiered_history
+
+        compressed_history = build_tiered_history(session)
+    except Exception:
+        # Fall back to original flat compression
+        try:
+            from deadline_agent.reasoning.context_window import build_compressed_history
+
+            compressed_history = build_compressed_history(session)
+        except Exception:
+            pass
+
+    try:
+        from deadline_agent.reasoning.causal import (
+            compute_causal_context,
+            compute_effort_context,
+        )
+
+        at_risk = unworked + overdue
+        if at_risk and patterns:
+            causal_statements = compute_causal_context(at_risk, patterns, now, session)
+            causal_statements += compute_effort_context(at_risk, patterns, session)
+    except Exception:
+        pass
+
+    try:
+        from deadline_agent.reasoning.tradeoffs import compute_tradeoff_context
+
+        tradeoff_statements = compute_tradeoff_context(
+            due_today + due_this_week, active_contexts, session
+        )
+    except Exception:
+        pass
+
+    try:
+        from deadline_agent.reasoning.context_window import (
+            _get_current_semester_week,
+            build_longitudinal_context,
+            predict_workload_spikes,
+        )
+
+        longitudinal_context = build_longitudinal_context(session)
+        semester_week = _get_current_semester_week(session)
+        spike_predictions = predict_workload_spikes(
+            session, semester_week, due_today + due_this_week, active_contexts
+        )
+    except Exception:
+        pass
+
     return StateSnapshot(
         now=now,
         due_today=due_today,
@@ -373,4 +869,18 @@ def build_state_snapshot(session: Session) -> StateSnapshot:
         life_contexts=active_contexts,
         total_pending=len(all_pending),
         total_done=total_done,
+        health_signals=health_signals,
+        stale_applications=stale_apps,
+        compressed_history=compressed_history,
+        causal_statements=causal_statements,
+        tradeoff_statements=tradeoff_statements,
+        longitudinal_context=longitudinal_context,
+        spike_predictions=spike_predictions,
+        identity_context=identity_context,
+        absence_signals=absence_signals,
+        goal_gaps=goal_gaps,
+        recent_decisions=recent_decisions,
+        relationship_alerts=relationship_alerts,
+        task_affect_context=task_affect_context,
+        recruiting_analytics=recruiting_analytics,
     )

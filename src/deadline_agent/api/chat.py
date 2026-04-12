@@ -10,14 +10,21 @@ from sqlalchemy.orm import Session
 
 from deadline_agent.api.schemas import (
     ActionResponse,
+    AmbientNotificationResponse,
     ApplicationResponse,
     ApproveActionRequest,
     ContextSnapshot,
+    CreateDecisionRequest,
+    CreateGoalRequest,
+    CurrentModeResponse,
     DebriefRequest,
     DebriefResponse,
+    DecisionResponse,
     DigestResponse,
     GmailMessage,
     GmailSearchRequest,
+    GoalResponse,
+    GoalStatusUpdate,
     InsightResponse,
     LifeContextResponse,
     NegotiateRequest,
@@ -26,14 +33,26 @@ from deadline_agent.api.schemas import (
     ProposeBlockRequest,
     QueryRequest,
     QueryResponse,
+    RecordOutcomeRequest,
+    RecoveryPlanRequest,
+    RecoveryPlansResponse,
+    RecruitingAnalyticsResponse,
     RecruitingPipelineResponse,
+    ResponseRateEntry,
+    FitScoreEntry,
+    MeetingBriefingResponse,
+    RelationshipResponse,
     SemesterRecordResponse,
     SetLifeContextRequest,
+    SimulateRequest,
+    SimulateResponse,
+    SimulationImpact,
     SignalEntry,
     StatusUpdate,
     TaskCountByStatus,
     TaskResponse,
     UpcomingInterview,
+    WeeklySnapshotResponse,
     _format_due,
 )
 from deadline_agent.models import Insight, ProposedAction, Task
@@ -235,11 +254,28 @@ def get_context(session: DBSession) -> ContextSnapshot:
         for c in active_contexts
     ]
 
+    # Phase 24: Enrich task responses with affect labels
+    affect_map: dict[str, str] = {}
+    try:
+        from deadline_agent.awareness.task_affect import get_task_affect_map
+
+        for task_type, affect in get_task_affect_map(session).items():
+            if affect.affect_label != "neutral":
+                affect_map[task_type] = affect.affect_label
+    except Exception:
+        pass
+
+    def _enrich(t: Task) -> TaskResponse:
+        resp = _task_to_response(t)
+        ntype = t.type.lower().strip()
+        resp.affect = affect_map.get(ntype)
+        return resp
+
     return ContextSnapshot(
         now=now_iso,
-        tasks_due_today=[_task_to_response(t) for t in due_today_tasks],
-        tasks_due_this_week=[_task_to_response(t) for t in due_week_tasks],
-        overdue_tasks=[_task_to_response(t) for t in overdue_tasks],
+        tasks_due_today=[_enrich(t) for t in due_today_tasks],
+        tasks_due_this_week=[_enrich(t) for t in due_week_tasks],
+        overdue_tasks=[_enrich(t) for t in overdue_tasks],
         task_count_by_status=TaskCountByStatus(**counts),
         proactive_alerts=alerts,
         insights=insight_responses,
@@ -457,6 +493,192 @@ async def get_weekly_review(session: DBSession) -> dict[str, str]:
     return {"review": review}
 
 
+@router.get("/ambient-notifications")
+def get_ambient_notifications() -> list[AmbientNotificationResponse]:
+    """Return ambient (low-priority) notifications for the widget ticker."""
+    from deadline_agent.notifications.channels import notification_router
+
+    queue = notification_router.get_ambient_queue()
+    return [AmbientNotificationResponse(**item) for item in queue]
+
+
+@router.get("/current-mode")
+def get_current_mode(session: DBSession) -> CurrentModeResponse:
+    """Return the active mode with mode-specific summary data."""
+    from deadline_agent.awareness.ambient_state import ambient_state
+    from deadline_agent.store.context_repository import LifeContextRepository
+
+    mode = ambient_state.current_mode
+    ctx_repo = LifeContextRepository(session)
+    active_contexts = ctx_repo.get_active()
+
+    # Build summary based on mode
+    summary = ""
+    label = ""
+    if active_contexts:
+        ctx = active_contexts[0]
+        label = ctx.label or ctx.season.replace("_", " ").title()
+
+    if mode == "recruiting":
+        try:
+            from deadline_agent.store.recruiting_repository import (
+                RecruitingRepository,
+            )
+
+            repo = RecruitingRepository(session)
+            active = repo.list_active()
+            summary = f"{len(active)} active application(s)"
+        except Exception:
+            pass
+    elif mode in ("school", None):
+        now = datetime.now(UTC)
+        overdue_count = (
+            session.execute(
+                select(func.count(Task.id))
+                .where(Task.status == "pending")
+                .where(Task.due_date_iso < now.isoformat())
+                .where(Task.due_date_iso.is_not(None))
+            ).scalar()
+            or 0
+        )
+        if overdue_count:
+            summary = f"{overdue_count} overdue task(s)"
+
+    return CurrentModeResponse(
+        mode=mode,
+        label=label,
+        summary=summary,
+        life_contexts=[
+            LifeContextResponse(
+                id=c.id,
+                season=c.season,
+                label=c.label,
+                start_date=c.start_date,
+                end_date=c.end_date,
+                source=c.source,
+                active=c.active,
+            )
+            for c in active_contexts
+        ],
+    )
+
+
+@router.get("/weekly-snapshots")
+def list_weekly_snapshots(
+    session: DBSession, limit: int = 8
+) -> list[WeeklySnapshotResponse]:
+    """List recent weekly snapshots."""
+    from deadline_agent.store.snapshot_repository import WeeklySnapshotRepository
+
+    repo = WeeklySnapshotRepository(session)
+    snapshots = repo.get_recent(limit=limit)
+    return [
+        WeeklySnapshotResponse(
+            id=s.id,
+            week_start=s.week_start,
+            week_end=s.week_end,
+            tasks_completed=s.tasks_completed,
+            tasks_slipped=s.tasks_slipped,
+            tasks_upcoming=s.tasks_upcoming,
+            total_work_minutes=s.total_work_minutes,
+            narrative=s.narrative,
+            semester_week_number=s.semester_week_number,
+            created_at=s.created_at.isoformat() if s.created_at else "",
+        )
+        for s in snapshots
+    ]
+
+
+@router.get("/weekly-snapshots/{week_start}")
+def get_weekly_snapshot(
+    session: DBSession, week_start: str
+) -> WeeklySnapshotResponse:
+    """Get a single weekly snapshot by week start date."""
+    from deadline_agent.store.snapshot_repository import WeeklySnapshotRepository
+
+    repo = WeeklySnapshotRepository(session)
+    s = repo.get_by_week(week_start)
+    if s is None:
+        raise HTTPException(status_code=404, detail="Weekly snapshot not found")
+    return WeeklySnapshotResponse(
+        id=s.id,
+        week_start=s.week_start,
+        week_end=s.week_end,
+        tasks_completed=s.tasks_completed,
+        tasks_slipped=s.tasks_slipped,
+        tasks_upcoming=s.tasks_upcoming,
+        total_work_minutes=s.total_work_minutes,
+        narrative=s.narrative,
+        semester_week_number=s.semester_week_number,
+        created_at=s.created_at.isoformat() if s.created_at else "",
+    )
+
+
+@router.post("/recovery-plan")
+async def generate_recovery_plan(
+    session: DBSession, body: RecoveryPlanRequest
+) -> RecoveryPlansResponse:
+    """Generate recovery plans for at-risk or overdue tasks."""
+    from deadline_agent.reasoning.recovery import (
+        generate_recovery_plans,
+    )
+    from deadline_agent.reasoning.state import build_state_snapshot
+
+    snapshot = build_state_snapshot(session)
+
+    if body.task_ids:
+        tasks = [
+            session.get(Task, tid) for tid in body.task_ids
+        ]
+        at_risk = [t for t in tasks if t is not None]
+    else:
+        at_risk = snapshot.overdue + snapshot.unworked_deadlines
+
+    if not at_risk:
+        return RecoveryPlansResponse(plans=[])
+
+    plans = await generate_recovery_plans(
+        session, at_risk, [], snapshot.behavioral_patterns
+    )
+    return RecoveryPlansResponse(
+        plans=[
+            {
+                "task_title": p.task_title,
+                "status": p.status,
+                "days_behind": p.days_behind,
+                "estimated_hours_remaining": p.estimated_hours_remaining,
+                "daily_blocks": [b.model_dump() for b in p.daily_blocks],
+                "tradeoff_note": p.tradeoff_note,
+            }
+            for p in plans
+        ]
+    )
+
+
+@router.post("/simulate")
+async def simulate(session: DBSession, body: SimulateRequest) -> SimulateResponse:
+    """Run a behavioral what-if simulation."""
+    from deadline_agent.extraction.extractor import ExtractionError
+    from deadline_agent.reasoning.simulation import simulate_scenario
+
+    try:
+        result = await simulate_scenario(session, body.scenario)
+    except ExtractionError as e:
+        raise HTTPException(status_code=503, detail=f"LLM unavailable: {e}") from e
+
+    return SimulateResponse(
+        scenario=result.scenario,
+        confidence=result.confidence,
+        confidence_reason=result.confidence_reason,
+        projected_impacts=[
+            SimulationImpact(**impact) for impact in result.projected_impacts
+        ],
+        weekly_projection=result.weekly_projection,
+        recommendation=result.recommendation,
+        data_density=result.data_density,
+    )
+
+
 @router.post("/analyze")
 def run_analysis(session: DBSession) -> dict[str, object]:
     """Run behavioral analysis: infer work sessions and detect patterns."""
@@ -560,6 +782,31 @@ def list_patterns(session: DBSession) -> list[dict[str, object]]:
         }
         for p in patterns
     ]
+
+
+@router.get("/affects")
+def list_affects(session: DBSession) -> list["TaskAffectResponse"]:
+    """List inferred task-type affect map."""
+    from deadline_agent.api.schemas import TaskAffectResponse
+    from deadline_agent.awareness.task_affect import (
+        get_energy_for_type,
+        get_intervention,
+        get_task_affect_map,
+    )
+
+    affect_map = get_task_affect_map(session)
+    results = []
+    for task_type, affect in affect_map.items():
+        energy = get_energy_for_type(session, task_type)
+        results.append(TaskAffectResponse(
+            task_type=task_type,
+            affect_label=affect.affect_label,
+            confidence=affect.confidence,
+            evidence=affect.evidence,
+            intervention=get_intervention(affect.affect_label),
+            energy_label=energy.energy_label if energy else None,
+        ))
+    return results
 
 
 @router.post("/negotiate")
@@ -856,6 +1103,9 @@ def get_recruiting_pipeline(session: DBSession) -> RecruitingPipelineResponse:
                 last_signal_at=app.last_signal_at.isoformat(),
                 signal_count=len(raw_signals),
                 signals=signal_entries,
+                company_tier=app.company_tier,
+                role_type=app.role_type,
+                resume_variant=app.resume_variant,
             )
         )
         if app.status in summary:
@@ -905,9 +1155,38 @@ async def refresh_recruiting_pipeline(session: DBSession) -> dict[str, int]:
     from deadline_agent.store.recruiting_repository import RecruitingRepository
 
     repo = RecruitingRepository(session)
-    created = 0
+    files_found = 0
 
-    # Scan existing recruiting file activity
+    # Direct filesystem scan for recruiting files in watched directories
+    import os
+    from pathlib import Path
+
+    from deadline_agent.awareness.classifier import classify_file
+    from deadline_agent.config import settings
+
+    for watch_dir in settings.watch_directories:
+        expanded = os.path.expanduser(watch_dir)
+        if not os.path.isdir(expanded):
+            continue
+        for entry in os.scandir(expanded):
+            if not entry.is_file():
+                continue
+            track = classify_file(entry.path, entry.name, expanded)
+            if track == "recruiting":
+                company = extract_company_from_filename(entry.name)
+                if company:
+                    stat = entry.stat()
+                    applied_dt = datetime.fromtimestamp(stat.st_mtime, tz=UTC)
+                    repo.upsert_application(
+                        company_name=company,
+                        source="file",
+                        signal={"type": "file", "date": applied_dt.isoformat(), "summary": entry.name},
+                        applied_at=applied_dt,
+                        signal_at=applied_dt,
+                    )
+                    files_found += 1
+
+    # Also scan existing recruiting file activity from DB
     file_activities = list(
         session.scalars(
             select(FileActivity).where(FileActivity.life_track == "recruiting")
@@ -922,8 +1201,8 @@ async def refresh_recruiting_pipeline(session: DBSession) -> dict[str, int]:
                 source="file",
                 signal={"type": "file", "date": fa.modified_at.isoformat(), "summary": fa.filename},
                 applied_at=fa.modified_at,
+                signal_at=fa.modified_at,
             )
-            created += 1
 
     # Search Gmail for recruiting emails
     email_scanned = 0
@@ -935,18 +1214,29 @@ async def refresh_recruiting_pipeline(session: DBSession) -> dict[str, int]:
         tm = TokenManager()
         token = await tm.get_valid_token()
         if token:
+            gmail_queries = [
+                "(application OR applied OR applying) newer_than:180d",
+                "(interview OR phone screen OR technical screen OR onsite) newer_than:180d",
+                "(thank you for your interest OR update on your application) newer_than:180d",
+                "(unfortunately OR regret OR other candidates OR not moving forward) newer_than:180d",
+            ]
             async with httpx.AsyncClient() as client:
+              seen_msg_ids: set[str] = set()
+              for gmail_q in gmail_queries:
                 resp = await client.get(
                     "https://gmail.googleapis.com/gmail/v1/users/me/messages",
                     params={
-                        "q": "subject:(interview OR application OR offer OR recruiter) newer_than:90d",
-                        "maxResults": 50,
+                        "q": gmail_q,
+                        "maxResults": 30,
                     },
                     headers={"Authorization": f"Bearer {token}"},
                     timeout=15.0,
                 )
                 if resp.status_code == 200:
                     for msg in resp.json().get("messages", []):
+                        if msg["id"] in seen_msg_ids:
+                            continue
+                        seen_msg_ids.add(msg["id"])
                         mr = await client.get(
                             f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg['id']}",
                             params={"format": "metadata", "metadataHeaders": ["Subject", "From", "Date"]},
@@ -965,10 +1255,20 @@ async def refresh_recruiting_pipeline(session: DBSession) -> dict[str, int]:
                         if has_recruiting_signal(text):
                             company = extract_company_from_email(sender, subject, snippet)
                             if company:
+                                # Parse email date for accurate signal_at
+                                email_date_str = hdrs.get("date", "")
+                                email_signal_at = None
+                                if email_date_str:
+                                    try:
+                                        from email.utils import parsedate_to_datetime
+                                        email_signal_at = parsedate_to_datetime(email_date_str)
+                                    except Exception:
+                                        pass
                                 app = repo.upsert_application(
                                     company_name=company,
                                     source="email",
-                                    signal={"type": "email", "date": hdrs.get("date", ""), "summary": subject[:100]},
+                                    signal={"type": "email", "date": email_date_str, "summary": subject[:100]},
+                                    signal_at=email_signal_at,
                                 )
                                 new_status = infer_status(app.status, text)
                                 if new_status != app.status:
@@ -981,4 +1281,344 @@ async def refresh_recruiting_pipeline(session: DBSession) -> dict[str, int]:
     except Exception:
         pass  # Gmail unavailable — still return file results
 
-    return {"applications_found": len(repo.list_all()), "files_scanned": len(file_activities), "emails_scanned": email_scanned}
+    return {"applications_found": len(repo.list_all()), "files_scanned": files_found, "emails_scanned": email_scanned}
+
+
+@router.get("/recruiting-analytics")
+def get_recruiting_analytics(session: DBSession) -> RecruitingAnalyticsResponse:
+    """Return recruiting intelligence analytics."""
+    import json as _json
+
+    from deadline_agent.behavioral.recruiting_report import compute_recruiting_stats
+    from deadline_agent.store.pattern_repository import PatternRepository
+
+    pattern_repo = PatternRepository(session)
+    stats = compute_recruiting_stats(session)
+
+    # Response rates
+    response_rates: list[ResponseRateEntry] = []
+    for p in pattern_repo.get_by_type("recruiting_response_rate"):
+        data = _json.loads(p.value)
+        response_rates.append(ResponseRateEntry(
+            key=p.pattern_key,
+            total=data.get("total", 0),
+            responded=data.get("responded", 0),
+            rate=data.get("rate", 0),
+        ))
+
+    # Over-indexing alerts
+    over_indexing: list[dict] = []
+    for p in pattern_repo.get_by_type("recruiting_over_index"):
+        over_indexing.append(_json.loads(p.value))
+
+    # Tier gaps
+    tier_gaps: list[dict] = []
+    for p in pattern_repo.get_by_type("recruiting_tier_gap"):
+        data = _json.loads(p.value)
+        data["tier"] = p.pattern_key
+        tier_gaps.append(data)
+
+    # Resume effectiveness
+    resume_eff: list[ResponseRateEntry] = []
+    for p in pattern_repo.get_by_type("recruiting_resume_effectiveness"):
+        data = _json.loads(p.value)
+        resume_eff.append(ResponseRateEntry(
+            key=p.pattern_key,
+            total=data.get("total", 0),
+            responded=data.get("responded", 0),
+            rate=data.get("rate", 0),
+        ))
+
+    # Temporal patterns
+    temporal: list[dict] = []
+    for p in pattern_repo.get_by_type("recruiting_temporal"):
+        data = _json.loads(p.value)
+        data["key"] = p.pattern_key
+        temporal.append(data)
+
+    # Fit scores
+    fit_scores: list[FitScoreEntry] = []
+    for p in pattern_repo.get_by_type("recruiting_fit_score"):
+        data = _json.loads(p.value)
+        fit_scores.append(FitScoreEntry(
+            company=data.get("company", p.pattern_key),
+            score=data.get("score", 0),
+            rank=data.get("rank", 99),
+            matching_factors=data.get("matching_factors", []),
+        ))
+    fit_scores.sort(key=lambda x: x.rank)
+
+    return RecruitingAnalyticsResponse(
+        response_rates=response_rates,
+        over_indexing_alerts=over_indexing,
+        tier_gaps=tier_gaps,
+        resume_effectiveness=resume_eff,
+        temporal_patterns=temporal,
+        fit_scores=fit_scores,
+        pipeline_stats=stats,
+    )
+
+
+@router.get("/identity")
+def get_identity(session: DBSession) -> dict:
+    """Return the current identity document."""
+    from deadline_agent.store.identity_repository import IdentityRepository
+
+    repo = IdentityRepository(session)
+    doc = repo.get_current()
+    if doc is None:
+        return {"version": 0, "markdown": "", "json": {}, "message": "No identity document yet. Run synthesis first."}
+
+    import json
+    try:
+        document = json.loads(doc.document_json)
+    except (json.JSONDecodeError, TypeError):
+        document = {}
+
+    return {
+        "version": doc.version,
+        "markdown": doc.document_markdown,
+        "json": document,
+        "last_synthesis_at": doc.last_synthesis_at.isoformat() if doc.last_synthesis_at else None,
+    }
+
+
+@router.post("/identity/synthesize")
+async def synthesize_identity_endpoint(session: DBSession) -> dict:
+    """Trigger on-demand identity synthesis."""
+    from deadline_agent.memory.identity_synthesizer import synthesize_identity
+
+    doc = await synthesize_identity(session)
+    return {"version": doc.version, "message": f"Identity synthesized (version {doc.version})"}
+
+
+@router.get("/knowledge-graph")
+def get_knowledge_graph(session: DBSession) -> dict:
+    """Return the knowledge graph summary."""
+    from deadline_agent.store.knowledge_repository import KnowledgeRepository
+
+    repo = KnowledgeRepository(session)
+    summary = repo.get_graph_summary()
+    entities = repo.list_entities(limit=50)
+
+    return {
+        "summary": summary,
+        "entities": [
+            {
+                "id": e.id,
+                "type": e.entity_type,
+                "name": e.name,
+                "mention_count": e.mention_count,
+                "first_seen": e.first_seen_at.isoformat() if e.first_seen_at else None,
+                "last_seen": e.last_seen_at.isoformat() if e.last_seen_at else None,
+            }
+            for e in entities
+        ],
+    }
+
+
+# ── Goal converters + endpoints ──────────────────────────────────────
+
+VALID_GOAL_CATEGORIES = {"academic", "recruiting", "health", "social", "personal"}
+VALID_GOAL_TERMINAL = {"achieved", "abandoned"}
+
+
+def _goal_to_response(goal) -> GoalResponse:
+    return GoalResponse(
+        id=goal.id,
+        description=goal.description,
+        category=goal.category,
+        target_metric=goal.target_metric,
+        status=goal.status,
+        created_at=goal.created_at.isoformat(),
+        updated_at=goal.updated_at.isoformat(),
+    )
+
+
+@router.get("/goals")
+def list_goals(session: DBSession) -> list[GoalResponse]:
+    """List active goals."""
+    from deadline_agent.store.goal_repository import GoalRepository
+
+    repo = GoalRepository(session)
+    return [_goal_to_response(g) for g in repo.list_active()]
+
+
+@router.post("/goals", status_code=201)
+def create_goal(session: DBSession, body: CreateGoalRequest) -> GoalResponse:
+    """Create a new goal."""
+    if body.category not in VALID_GOAL_CATEGORIES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid category. Must be one of: {', '.join(sorted(VALID_GOAL_CATEGORIES))}",
+        )
+    from deadline_agent.store.goal_repository import GoalRepository
+
+    repo = GoalRepository(session)
+    goal = repo.create(body.description, body.category, body.target_metric)
+    return _goal_to_response(goal)
+
+
+@router.patch("/goals/{goal_id}/status")
+def update_goal_status(
+    session: DBSession, goal_id: int, body: GoalStatusUpdate
+) -> GoalResponse:
+    """Mark a goal as achieved or abandoned."""
+    if body.status not in VALID_GOAL_TERMINAL:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid status. Must be one of: {', '.join(sorted(VALID_GOAL_TERMINAL))}",
+        )
+    from deadline_agent.store.goal_repository import GoalRepository
+
+    repo = GoalRepository(session)
+    goal = repo.update_status(goal_id, body.status)
+    if goal is None:
+        raise HTTPException(status_code=404, detail="Goal not found")
+    return _goal_to_response(goal)
+
+
+# ── Decision converters + endpoints ──────────────────────────────────
+
+
+def _decision_to_response(decision) -> DecisionResponse:
+    import json
+
+    return DecisionResponse(
+        id=decision.id,
+        description=decision.description,
+        alternatives_considered=json.loads(decision.alternatives_considered),
+        chosen_option=decision.chosen_option,
+        context_json=json.loads(decision.context_json),
+        outcome=decision.outcome,
+        outcome_recorded_at=(
+            decision.outcome_recorded_at.isoformat()
+            if decision.outcome_recorded_at
+            else None
+        ),
+        created_at=decision.created_at.isoformat(),
+    )
+
+
+@router.get("/decisions")
+def list_decisions(
+    session: DBSession, limit: int = 10
+) -> list[DecisionResponse]:
+    """List recent decisions."""
+    from deadline_agent.store.decision_repository import DecisionRepository
+
+    repo = DecisionRepository(session)
+    return [_decision_to_response(d) for d in repo.list_recent(limit=limit)]
+
+
+@router.post("/decisions", status_code=201)
+def create_decision(
+    session: DBSession, body: CreateDecisionRequest
+) -> DecisionResponse:
+    """Record a decision."""
+    from deadline_agent.store.decision_repository import DecisionRepository
+
+    repo = DecisionRepository(session)
+    decision = repo.create(
+        body.description, body.chosen_option, body.alternatives, body.context
+    )
+    return _decision_to_response(decision)
+
+
+@router.patch("/decisions/{decision_id}/outcome")
+def record_decision_outcome(
+    session: DBSession, decision_id: int, body: RecordOutcomeRequest
+) -> DecisionResponse:
+    """Record the outcome of a decision."""
+    from deadline_agent.store.decision_repository import DecisionRepository
+
+    repo = DecisionRepository(session)
+    decision = repo.record_outcome(decision_id, body.outcome)
+    if decision is None:
+        raise HTTPException(status_code=404, detail="Decision not found")
+    return _decision_to_response(decision)
+
+
+# ── Relationship endpoint ────────────────────────────────────────────
+
+
+def _relationship_to_response(rel) -> RelationshipResponse:
+    return RelationshipResponse(
+        id=rel.id,
+        person=rel.person,
+        channel=rel.channel,
+        interaction_count=rel.interaction_count,
+        last_interaction_at=(
+            rel.last_interaction_at.isoformat()
+            if rel.last_interaction_at
+            else None
+        ),
+        avg_response_time_hours=rel.avg_response_time_hours,
+        trend=rel.trend,
+        energy_signal=rel.energy_signal,
+    )
+
+
+@router.get("/relationships")
+def list_relationships(
+    session: DBSession, limit: int = 50
+) -> list[RelationshipResponse]:
+    """List tracked relationships."""
+    from deadline_agent.config import settings
+
+    if not settings.enable_social_graph:
+        return []
+
+    from deadline_agent.store.relationship_repository import RelationshipRepository
+
+    repo = RelationshipRepository(session)
+    return [_relationship_to_response(r) for r in repo.list_all(limit=limit)]
+
+
+@router.get("/meeting-briefing")
+async def next_meeting_briefing(
+    session: DBSession, lead_minutes: int = 30
+) -> MeetingBriefingResponse | None:
+    """Generate a briefing for the next upcoming meeting."""
+    from deadline_agent.awareness.meeting_briefing import MeetingBriefingGenerator
+    from deadline_agent.reasoning.calendar_gaps import USER_TZ, fetch_events
+
+    now = datetime.now(USER_TZ)
+    window_end = now + timedelta(minutes=lead_minutes)
+    events = await fetch_events(now.isoformat(), window_end.isoformat())
+
+    # Find the next timed event
+    next_event = None
+    minutes_until = 0.0
+    for ev in events:
+        start_str = ev.get("start", "")
+        if "T" not in start_str:
+            continue
+        try:
+            start_dt = datetime.fromisoformat(start_str).astimezone(USER_TZ)
+        except ValueError:
+            continue
+        mins = (start_dt - now).total_seconds() / 60
+        if mins > 0:
+            next_event = ev
+            minutes_until = mins
+            break
+
+    if not next_event:
+        return None
+
+    gen = MeetingBriefingGenerator(lambda: session)
+    attendee_context = gen._build_attendee_context(
+        next_event.get("attendees", []), session
+    )
+    briefing = await gen._generate_briefing(
+        next_event, attendee_context, minutes_until, session
+    )
+
+    return MeetingBriefingResponse(
+        summary=next_event.get("summary", ""),
+        start=next_event.get("start", ""),
+        minutes_until=int(minutes_until),
+        briefing=briefing or "No briefing available.",
+        attendee_count=len(attendee_context),
+    )

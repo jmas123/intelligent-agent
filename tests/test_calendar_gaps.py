@@ -8,14 +8,15 @@ from deadline_agent.reasoning.calendar_gaps import fetch_free_busy, find_gaps
 
 
 def test_find_gaps_simple() -> None:
+    # Use EDT (-04:00) timestamps so "reasonable hours" (8am-10pm local) align
     busy = [
-        {"start": "2026-03-25T09:00:00+00:00", "end": "2026-03-25T10:00:00+00:00"},
-        {"start": "2026-03-25T14:00:00+00:00", "end": "2026-03-25T15:00:00+00:00"},
+        {"start": "2026-03-25T09:00:00-04:00", "end": "2026-03-25T10:00:00-04:00"},
+        {"start": "2026-03-25T14:00:00-04:00", "end": "2026-03-25T15:00:00-04:00"},
     ]
     gaps = find_gaps(
         busy,
-        "2026-03-25T08:00:00+00:00",
-        "2026-03-25T22:00:00+00:00",
+        "2026-03-25T08:00:00-04:00",
+        "2026-03-25T22:00:00-04:00",
         min_minutes=60,
     )
     # Gaps: 8:00-9:00 (1h), 10:00-14:00 (4h), 15:00-22:00 (7h)
@@ -28,8 +29,8 @@ def test_find_gaps_simple() -> None:
 def test_find_gaps_no_busy() -> None:
     gaps = find_gaps(
         [],
-        "2026-03-25T08:00:00+00:00",
-        "2026-03-25T22:00:00+00:00",
+        "2026-03-25T08:00:00-04:00",
+        "2026-03-25T22:00:00-04:00",
         min_minutes=60,
     )
     assert len(gaps) == 1
@@ -51,12 +52,12 @@ def test_find_gaps_fully_busy() -> None:
 
 def test_find_gaps_filters_short() -> None:
     busy = [
-        {"start": "2026-03-25T09:00:00+00:00", "end": "2026-03-25T09:30:00+00:00"},
+        {"start": "2026-03-25T09:00:00-04:00", "end": "2026-03-25T09:30:00-04:00"},
     ]
     gaps = find_gaps(
         busy,
-        "2026-03-25T08:00:00+00:00",
-        "2026-03-25T10:00:00+00:00",
+        "2026-03-25T08:00:00-04:00",
+        "2026-03-25T10:00:00-04:00",
         min_minutes=60,
     )
     # 8-9 = 60min (passes), 9:30-10 = 30min (filtered)

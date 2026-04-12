@@ -51,7 +51,8 @@ async def process_file_events(session_factory: Any, event_queue: asyncio.Queue[F
                     activity.life_track = track
                     session.commit()
 
-                # Track recruiting applications from file names
+                # Track recruiting applications from file names — run early,
+                # before event bus / ambient state which can fail independently
                 if track == "recruiting":
                     from deadline_agent.awareness.recruiting_extractor import (
                         extract_company_from_filename,
@@ -61,6 +62,11 @@ async def process_file_events(session_factory: Any, event_queue: asyncio.Queue[F
                     )
 
                     company = extract_company_from_filename(activity.filename)
+                    if not company:
+                        logger.warning(
+                            "Recruiting file detected but company extraction failed: %s",
+                            activity.filename,
+                        )
                     if company:
                         recruiting_repo = RecruitingRepository(session)
                         recruiting_repo.upsert_application(
@@ -73,6 +79,54 @@ async def process_file_events(session_factory: Any, event_queue: asyncio.Queue[F
                             },
                             applied_at=event.timestamp,
                         )
+
+                # Event bus and ambient state — failures here should not block
+                # core processing (recruiting tracking, task linking)
+                try:
+                    from deadline_agent.events import (
+                        CONTEXT_SWITCH_DETECTED,
+                        FILE_ACTIVITY_RECORDED,
+                        SESSION_STARTED,
+                        Event,
+                        event_bus,
+                    )
+
+                    await event_bus.emit(Event(
+                        type=FILE_ACTIVITY_RECORDED,
+                        payload={
+                            "activity_id": activity.id,
+                            "path": activity.path,
+                            "filename": activity.filename,
+                        },
+                    ))
+
+                    from deadline_agent.awareness.ambient_state import ambient_state
+
+                    session_started, prev_mode = ambient_state.record_activity(
+                        track, event.timestamp
+                    )
+
+                    if session_started:
+                        await event_bus.emit(Event(
+                            type=SESSION_STARTED,
+                            payload={
+                                "life_track": track,
+                                "project_dir": activity.directory,
+                                "timestamp": event.timestamp.isoformat(),
+                            },
+                        ))
+
+                    if prev_mode is not None:
+                        await event_bus.emit(Event(
+                            type=CONTEXT_SWITCH_DETECTED,
+                            payload={
+                                "from_mode": prev_mode,
+                                "to_mode": track or "school",
+                                "timestamp": event.timestamp.isoformat(),
+                            },
+                        ))
+                except Exception:
+                    logger.warning("Event bus / ambient state error", exc_info=True)
 
                 linker = TaskLinker(session)
                 matches = linker.find_matching_tasks(activity)

@@ -330,6 +330,52 @@ def ask_command(question: str) -> None:
     click.echo(answer)
 
 
+@cli.command("simulate")
+@click.argument("scenario")
+def simulate_command(scenario: str) -> None:
+    """Simulate a what-if scenario over your behavioral data."""
+    from deadline_agent.reasoning.simulation import simulate_scenario
+
+    async def _run() -> object:
+        with SessionLocal() as session:
+            return await simulate_scenario(session, scenario)
+
+    try:
+        result = asyncio.run(_run())
+    except Exception as e:
+        click.echo(f"Simulation failed: {e}", err=True)
+        raise SystemExit(1) from e
+
+    # Confidence badge
+    conf_icon = {"high": "+", "medium": "~", "low": "-"}.get(result.confidence, "?")
+    click.echo(f"[{conf_icon}] Confidence: {result.confidence} — {result.confidence_reason}\n")
+
+    # Projected impacts
+    if result.projected_impacts:
+        click.echo("PROJECTED IMPACTS:")
+        severity_icons = {
+            "positive": "+", "neutral": " ", "concerning": "!", "critical": "!!",
+        }
+        for impact in result.projected_impacts:
+            icon = severity_icons.get(impact["severity"], "?")
+            click.echo(f"  [{icon}] {impact['domain']}: {impact['impact']}")
+        click.echo()
+
+    # Weekly projection
+    if result.weekly_projection:
+        click.echo("WEEK-BY-WEEK PROJECTION:")
+        click.echo(result.weekly_projection)
+        click.echo()
+
+    # Recommendation
+    if result.recommendation:
+        click.echo("RECOMMENDATION:")
+        click.echo(result.recommendation)
+
+    # Data density
+    click.echo(f"\nData: {result.data_density}")
+
+
 @cli.command("chat")
 def chat_command() -> None:
     """Open the floating widget interface."""
@@ -534,6 +580,55 @@ def patterns_command() -> None:
             click.echo(
                 f"  {desc}  ({p.sample_count} observations, {conf_label} confidence)"
             )
+
+
+@cli.command("affects")
+def affects_command() -> None:
+    """Show inferred task-type affect map."""
+    from deadline_agent.awareness.task_affect import get_intervention, get_task_affect_map
+    from deadline_agent.config import settings
+
+    with SessionLocal() as session:
+        affect_map = get_task_affect_map(session)
+
+    if not affect_map:
+        click.echo("No task affect patterns learned yet.")
+        click.echo("Affects are inferred after enough completed tasks with work sessions.")
+        return
+
+    # Group by affect label
+    by_affect: dict[str, list[tuple[str, object]]] = {}
+    for task_type, affect in affect_map.items():
+        by_affect.setdefault(affect.affect_label, []).append((task_type, affect))
+
+    AFFECT_ICONS = {
+        "enjoyment": "+",
+        "neutral": "·",
+        "avoidance": "!",
+        "anxiety": "x",
+    }
+
+    for label in ("enjoyment", "neutral", "avoidance", "anxiety"):
+        items = by_affect.get(label, [])
+        if not items:
+            continue
+        icon = AFFECT_ICONS[label]
+        click.echo(f"\n[{icon}] {label.upper()}:")
+        for task_type, affect in items:
+            conf_pct = int(affect.confidence * 100)
+            evidence = affect.evidence
+            parts = []
+            lag = evidence.get("mean_start_lag_pct")
+            if lag is not None:
+                parts.append(f"start at {lag:.0%} of available time")
+            no_work = evidence.get("no_work_rate")
+            if no_work is not None and no_work > 0:
+                parts.append(f"{no_work:.0%} skipped")
+            detail = ", ".join(parts)
+            click.echo(f"  {task_type}: {detail} ({conf_pct}% confidence)")
+            intervention = get_intervention(label)
+            if intervention:
+                click.echo(f"    -> {intervention}")
 
 
 @cli.command("schedule")
@@ -749,3 +844,482 @@ def debrief_command(
     click.echo(result["debrief_text"])
     click.echo()
     click.echo(f"(Saved as record #{result['record_id']})")
+
+
+@cli.group("lora")
+def lora_group() -> None:
+    """LoRA fine-tuning data management."""
+
+
+@lora_group.command("stats")
+def lora_stats() -> None:
+    """Show training data statistics."""
+    from deadline_agent.lora.export import get_training_stats
+
+    with SessionLocal() as session:
+        stats = get_training_stats(session)
+
+    ext = stats["extraction_logs"]
+    click.echo("EXTRACTION LOGS:")
+    click.echo(f"  Total: {ext['total']}  (accepted: {ext['accepted']}, rejected: {ext['rejected']})")
+    if ext["avg_confidence"] is not None:
+        click.echo(f"  Avg confidence (accepted): {ext['avg_confidence']}")
+
+    dig = stats["digest_logs"]
+    click.echo(f"\nDIGEST LOGS: {dig['total']}")
+    if dig["by_type"]:
+        for ptype, count in dig["by_type"].items():
+            click.echo(f"  {ptype}: {count}")
+
+    click.echo(f"\nSYNTHETIC-ELIGIBLE TASKS: {stats['synthetic_eligible_tasks']}")
+
+    if ext["total"] == 0 and dig["total"] == 0:
+        click.echo("\nNo training data logged yet.")
+        click.echo("Enable with: lora_log_training_data = true in config.toml [lora] section")
+
+
+@lora_group.command("export-extraction")
+@click.option("--min-confidence", default=0.75, show_default=True, help="Minimum confidence threshold")
+@click.option("--output", "-o", default="extraction_pairs.jsonl", show_default=True, help="Output JSONL path")
+@click.option("--synthetic", is_flag=True, help="Generate synthetic pairs from Task table instead")
+def lora_export_extraction(min_confidence: float, output: str, synthetic: bool) -> None:
+    """Export extraction training pairs as JSONL."""
+    from deadline_agent.lora.export import (
+        export_extraction_pairs,
+        export_synthetic_pairs,
+        write_jsonl,
+    )
+
+    with SessionLocal() as session:
+        if synthetic:
+            pairs = export_synthetic_pairs(session)
+            click.echo(f"Generated {len(pairs)} synthetic pairs from Task table.")
+        else:
+            pairs = export_extraction_pairs(session, min_confidence=min_confidence)
+            click.echo(f"Found {len(pairs)} extraction pairs (confidence >= {min_confidence}).")
+
+    if not pairs:
+        click.echo("No training data to export.")
+        return
+
+    count = write_jsonl(pairs, output)
+    click.echo(f"Wrote {count} pairs to {output}")
+
+
+@lora_group.command("export-digest")
+@click.option("--output", "-o", default="digest_pairs.jsonl", show_default=True, help="Output JSONL path")
+@click.option("--type", "prompt_type", default=None, type=click.Choice(["digest", "insight", "query"]),
+              help="Filter by prompt type")
+def lora_export_digest(output: str, prompt_type: str | None) -> None:
+    """Export digest/reasoning training pairs as JSONL."""
+    from deadline_agent.lora.export import export_digest_pairs, write_jsonl
+
+    with SessionLocal() as session:
+        pairs = export_digest_pairs(session, prompt_type=prompt_type)
+
+    if not pairs:
+        click.echo("No digest training data to export.")
+        return
+
+    count = write_jsonl(pairs, output)
+    click.echo(f"Wrote {count} pairs to {output}")
+
+
+@lora_group.command("evaluate")
+@click.argument("model_tag")
+@click.option("--test-file", required=True, help="Path to JSONL test pairs")
+@click.option("--compare-to", default=None, help="Base model to compare against")
+def lora_evaluate(model_tag: str, test_file: str, compare_to: str | None) -> None:
+    """Evaluate a model against held-out test pairs."""
+    from deadline_agent.lora.evaluate import compare_models, evaluate_model, load_test_pairs
+
+    pairs = load_test_pairs(test_file)
+    click.echo(f"Loaded {len(pairs)} test pairs from {test_file}")
+
+    if compare_to:
+        result = asyncio.run(compare_models(compare_to, model_tag, pairs))
+        for label, data in [("BASE", result["base"]), ("FINETUNED", result["finetuned"])]:
+            click.echo(f"\n{label} ({data['model']}):")
+            click.echo(f"  Valid JSON: {data['valid_json']}/{data['total']}")
+            click.echo(f"  Schema valid: {data['schema_valid']}/{data['total']}")
+            if data["avg_confidence"]:
+                click.echo(f"  Avg confidence: {data['avg_confidence']}")
+            click.echo(f"  Field accuracy: {data['field_accuracy']}")
+
+        imp = result["improvements"]
+        click.echo(f"\nIMPROVEMENTS:")
+        click.echo(f"  Valid JSON: {imp['valid_json_delta']:+d}")
+        click.echo(f"  Schema valid: {imp['schema_valid_delta']:+d}")
+        for field, delta in imp["field_accuracy_delta"].items():
+            if delta != 0:
+                click.echo(f"  {field}: {delta:+.3f}")
+    else:
+        result = asyncio.run(evaluate_model(model_tag, pairs))
+        click.echo(f"\nRESULTS ({result['model']}):")
+        click.echo(f"  Valid JSON: {result['valid_json']}/{result['total']}")
+        click.echo(f"  Schema valid: {result['schema_valid']}/{result['total']}")
+        if result["avg_confidence"]:
+            click.echo(f"  Avg confidence: {result['avg_confidence']}")
+        click.echo(f"  Field accuracy: {result['field_accuracy']}")
+
+
+@lora_group.command("modelfile")
+@click.argument("gguf_path")
+@click.option("--task", type=click.Choice(["extraction", "reasoning"]), default="extraction",
+              show_default=True, help="Task type determines system prompt")
+@click.option("--output", "-o", default="Modelfile", show_default=True, help="Output path")
+def lora_modelfile(gguf_path: str, task: str, output: str) -> None:
+    """Generate an Ollama Modelfile for a LoRA-merged GGUF."""
+    from pathlib import Path
+
+    from deadline_agent.lora.modelfile import generate_modelfile
+
+    content = generate_modelfile(gguf_path, task=task)
+    Path(output).write_text(content)
+    click.echo(f"Modelfile written to {output}")
+    click.echo(f"Load into Ollama with: ollama create deadline-{task} -f {output}")
+
+
+@cli.group("identity")
+def identity_group() -> None:
+    """View and manage the durable identity model."""
+
+
+@identity_group.command("show")
+def identity_show() -> None:
+    """Display the current identity document."""
+    from deadline_agent.store.identity_repository import IdentityRepository
+
+    with SessionLocal() as session:
+        repo = IdentityRepository(session)
+        doc = repo.get_current()
+
+    if doc is None:
+        click.echo("No identity document yet.")
+        click.echo("Run `deadline-agent identity synthesize` to generate one.")
+        return
+
+    click.echo(f"Identity Document (version {doc.version})")
+    click.echo(f"Last synthesized: {doc.last_synthesis_at}")
+    click.echo("=" * 60)
+    click.echo(doc.document_markdown)
+
+
+@identity_group.command("synthesize")
+def identity_synthesize() -> None:
+    """Synthesize the identity document now."""
+    from deadline_agent.memory.identity_synthesizer import synthesize_identity
+
+    async def _run() -> int:
+        with SessionLocal() as session:
+            doc = await synthesize_identity(session)
+            return doc.version
+
+    click.echo("Synthesizing identity...")
+    version = asyncio.run(_run())
+    click.echo(f"Identity document synthesized (version {version}).")
+    click.echo("Run `deadline-agent identity show` to view it.")
+
+
+@identity_group.command("export")
+@click.option("--output", "-o", default=None, help="Output path (default: ~/identity.md)")
+def identity_export(output: str | None) -> None:
+    """Export the identity document as a portable markdown file."""
+    from pathlib import Path
+
+    from deadline_agent.store.identity_repository import IdentityRepository
+
+    with SessionLocal() as session:
+        repo = IdentityRepository(session)
+        doc = repo.get_current()
+
+    if doc is None:
+        click.echo("No identity document to export. Run `deadline-agent identity synthesize` first.")
+        return
+
+    export_path = Path(output) if output else Path.home() / "identity.md"
+    header = (
+        f"# About You — Deadline Agent Identity Document\n"
+        f"*Version {doc.version} | Last synthesized: {doc.last_synthesis_at}*\n"
+        f"*This document is owned by you. Export it, modify it, or import it into any system.*\n\n"
+    )
+    export_path.write_text(header + doc.document_markdown)
+    click.echo(f"Identity exported to {export_path}")
+
+
+@cli.group("goals")
+def goals_group() -> None:
+    """Manage stated goals and track intention vs behavior gaps."""
+
+
+@goals_group.command("add")
+@click.argument("description")
+@click.option(
+    "--category",
+    type=click.Choice(["academic", "recruiting", "health", "social", "personal"]),
+    default="personal",
+    show_default=True,
+)
+@click.option("--target", default=None, help='Target metric, e.g. "4h/week on CS 301"')
+def goals_add(description: str, category: str, target: str | None) -> None:
+    """Add a new goal."""
+    from deadline_agent.store.goal_repository import GoalRepository
+
+    with SessionLocal() as session:
+        repo = GoalRepository(session)
+        goal = repo.create(description, category, target)
+        goal_id = goal.id
+    click.echo(f"Goal [{goal_id}] created: {description}")
+
+
+@goals_group.command("list")
+@click.option("--all", "show_all", is_flag=True, help="Show all goals, not just active")
+def goals_list(show_all: bool) -> None:
+    """List goals with current gap analysis."""
+    from deadline_agent.awareness.goal_tracker import compute_goal_gaps
+    from deadline_agent.store.goal_repository import GoalRepository
+
+    with SessionLocal() as session:
+        repo = GoalRepository(session)
+        goals = repo.list_all() if show_all else repo.list_active()
+
+        if not goals:
+            click.echo("No goals found. Use `deadline-agent goals add` to create one.")
+            return
+
+        gaps = compute_goal_gaps(session)
+
+    for g in goals:
+        status_tag = f" [{g.status}]" if g.status != "active" else ""
+        target_tag = f" (target: {g.target_metric})" if g.target_metric else ""
+        click.echo(f"[{g.id}] {g.description}{target_tag} — {g.category}{status_tag}")
+
+    if gaps:
+        click.echo("\nGap analysis:")
+        for gap in gaps:
+            click.echo(f"  {gap}")
+
+
+@goals_group.command("achieve")
+@click.argument("goal_id", type=int)
+def goals_achieve(goal_id: int) -> None:
+    """Mark a goal as achieved."""
+    from deadline_agent.store.goal_repository import GoalRepository
+
+    with SessionLocal() as session:
+        repo = GoalRepository(session)
+        result = repo.update_status(goal_id, "achieved")
+    if result is None:
+        click.echo(f"Goal {goal_id} not found.")
+    else:
+        click.echo(f"Goal {goal_id} marked as achieved.")
+
+
+@goals_group.command("abandon")
+@click.argument("goal_id", type=int)
+def goals_abandon(goal_id: int) -> None:
+    """Mark a goal as abandoned."""
+    from deadline_agent.store.goal_repository import GoalRepository
+
+    with SessionLocal() as session:
+        repo = GoalRepository(session)
+        result = repo.update_status(goal_id, "abandoned")
+    if result is None:
+        click.echo(f"Goal {goal_id} not found.")
+    else:
+        click.echo(f"Goal {goal_id} abandoned.")
+
+
+@cli.group("decide")
+def decide_group() -> None:
+    """Log decisions and track their outcomes over time."""
+
+
+@decide_group.command("log")
+@click.argument("description")
+@click.option("--alternatives", default=None, help="Comma-separated alternatives considered")
+@click.option("--chosen", required=True, help="The option you chose")
+def decide_log(description: str, alternatives: str | None, chosen: str) -> None:
+    """Log a decision."""
+    from deadline_agent.store.decision_repository import DecisionRepository
+
+    alt_list = [a.strip() for a in alternatives.split(",")] if alternatives else []
+
+    with SessionLocal() as session:
+        repo = DecisionRepository(session)
+        decision = repo.create(description, chosen, alt_list)
+        decision_id = decision.id
+    click.echo(f"Decision [{decision_id}] logged: {description} (chose: {chosen})")
+
+
+@decide_group.command("list")
+@click.option("--limit", default=10, show_default=True)
+def decide_list(limit: int) -> None:
+    """Show recent decisions."""
+    from deadline_agent.store.decision_repository import DecisionRepository
+
+    with SessionLocal() as session:
+        repo = DecisionRepository(session)
+        decisions = repo.list_recent(limit=limit)
+
+    if not decisions:
+        click.echo("No decisions logged yet.")
+        return
+
+    for d in decisions:
+        outcome = f" → {d.outcome}" if d.outcome else " (no outcome yet)"
+        click.echo(f"[{d.id}] {d.description} — chose: {d.chosen_option}{outcome}")
+
+
+@decide_group.command("outcome")
+@click.argument("decision_id", type=int)
+@click.argument("outcome_text")
+def decide_outcome(decision_id: int, outcome_text: str) -> None:
+    """Record the outcome of a past decision."""
+    from deadline_agent.store.decision_repository import DecisionRepository
+
+    with SessionLocal() as session:
+        repo = DecisionRepository(session)
+        result = repo.record_outcome(decision_id, outcome_text)
+
+    if result is None:
+        click.echo(f"Decision {decision_id} not found.")
+    else:
+        click.echo(f"Outcome recorded for decision {decision_id}.")
+
+
+@cli.command("knowledge-graph")
+def knowledge_graph_command() -> None:
+    """Show the personal knowledge graph."""
+    from deadline_agent.store.knowledge_repository import KnowledgeRepository
+
+    with SessionLocal() as session:
+        repo = KnowledgeRepository(session)
+        entities = repo.list_entities(limit=30)
+
+    if not entities:
+        click.echo("No entities in the knowledge graph yet.")
+        click.echo("Entities are extracted during behavioral analysis.")
+        return
+
+    by_type: dict[str, list[object]] = {}
+    for e in entities:
+        by_type.setdefault(e.entity_type, []).append(e)
+
+    for etype, items in by_type.items():
+        click.echo(f"\n{etype.upper()}S:")
+        for e in items:
+            click.echo(f"  {e.name} ({e.mention_count} mentions)")
+
+
+# ── Phase 25: Recruiting intelligence ────────────────────────────────
+
+
+@cli.group("recruiting")
+def recruiting_group() -> None:
+    """Recruiting pipeline analytics and management."""
+
+
+@recruiting_group.command("pipeline")
+def recruiting_pipeline() -> None:
+    """Show recruiting pipeline summary."""
+    from deadline_agent.store.recruiting_repository import RecruitingRepository
+
+    with SessionLocal() as session:
+        repo = RecruitingRepository(session)
+        apps = repo.list_all()
+
+    if not apps:
+        click.echo("No applications tracked yet.")
+        click.echo("Run: deadline-agent recruiting refresh")
+        return
+
+    # Status counts
+    from collections import Counter
+
+    statuses = Counter(a.status for a in apps)
+    click.echo(f"\nPipeline: {len(apps)} applications")
+    for s in ["applied", "response", "interview", "offer", "closed"]:
+        if statuses.get(s):
+            click.echo(f"  {s}: {statuses[s]}")
+
+    # Active applications
+    active = [a for a in apps if a.status != "closed"]
+    if active:
+        click.echo(f"\nActive ({len(active)}):")
+        for a in active[:15]:
+            tier = f" [{a.company_tier}]" if a.company_tier else ""
+            click.echo(f"  {a.company_name}{tier} — {a.status}")
+        if len(active) > 15:
+            click.echo(f"  ...and {len(active) - 15} more")
+
+
+@recruiting_group.command("report")
+def recruiting_report() -> None:
+    """Generate a recruiting intelligence report."""
+    from deadline_agent.behavioral.recruiting_report import (
+        compute_recruiting_stats,
+        generate_recruiting_report,
+    )
+
+    with SessionLocal() as session:
+        stats = compute_recruiting_stats(session)
+
+    if stats["total_count"] == 0:
+        click.echo("No applications tracked yet.")
+        return
+
+    click.echo("\n═══ Recruiting Intelligence Report ═══\n")
+
+    # Pipeline stats
+    click.echo(f"Applications: {stats['total_count']} total, {stats['active_count']} active")
+    click.echo(f"Response rate: {stats['response_rate']:.0%}")
+    click.echo(f"Stale (14+ days): {stats['stale_count']}")
+    click.echo(f"New this week: {stats['new_this_week']}")
+
+    # By tier
+    by_tier = stats.get("by_tier", {})
+    if by_tier:
+        click.echo("\nBy tier:")
+        for tier, count in sorted(by_tier.items(), key=lambda x: -x[1]):
+            click.echo(f"  {tier}: {count}")
+
+    # By status
+    by_status = stats.get("by_status", {})
+    if by_status:
+        click.echo("\nBy status:")
+        for status in ["applied", "response", "interview", "offer", "closed"]:
+            if by_status.get(status):
+                click.echo(f"  {status}: {by_status[status]}")
+
+    # Fit scores
+    fit = stats.get("top_fit_scores", [])
+    if fit:
+        click.echo("\nTop fit-scored applications:")
+        for fs in fit:
+            click.echo(f"  #{fs['rank']} {fs['company']} — {fs['score']:.0%}")
+
+    # LLM narrative
+    click.echo("\n--- Analysis ---\n")
+    narrative = asyncio.run(generate_recruiting_report(SessionLocal()))
+    click.echo(narrative)
+
+
+@recruiting_group.command("classify")
+@click.argument("company")
+@click.argument("tier", type=click.Choice(
+    ["big_tech", "mid_cap", "startup_early", "startup_growth", "finance", "other"]
+))
+def recruiting_classify(company: str, tier: str) -> None:
+    """Manually set a company's tier classification."""
+    from deadline_agent.store.recruiting_repository import RecruitingRepository
+
+    with SessionLocal() as session:
+        repo = RecruitingRepository(session)
+        app = repo.find_by_company(company.lower())
+        if app is None:
+            click.echo(f"No application found for '{company}'.")
+            return
+        app.company_tier = tier
+        session.commit()
+        click.echo(f"Set {app.company_name} → {tier}")

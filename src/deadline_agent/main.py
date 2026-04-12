@@ -149,6 +149,20 @@ async def weekly_review_scheduler() -> None:
                     title="Deadline Agent — Weekly Review",
                     body=review[:500],
                 )
+                # Persist weekly snapshot for longitudinal reasoning
+                from deadline_agent.reasoning.weekly_review import persist_weekly_snapshot
+
+                await persist_weekly_snapshot(session)
+
+                # Synthesize identity document after weekly snapshot
+                if settings.identity_synthesis_enabled:
+                    try:
+                        from deadline_agent.memory.identity_synthesizer import synthesize_identity
+
+                        doc = await synthesize_identity(session)
+                        logger.info("Identity synthesized (version %d)", doc.version)
+                    except Exception:
+                        logger.exception("Identity synthesis failed")
         except Exception:
             logger.exception("Weekly review scheduler error")
 
@@ -174,6 +188,36 @@ async def behavioral_analysis_scheduler() -> None:
                 patterns = run_all_analyses(session)
                 if patterns:
                     logger.info("Updated %d behavioral pattern(s)", len(patterns))
+
+                # Update knowledge graph entities
+                try:
+                    from deadline_agent.memory.knowledge_extractor import run_entity_extraction
+
+                    entity_count = run_entity_extraction(session)
+                    if entity_count:
+                        logger.info("Knowledge graph: updated %d entities", entity_count)
+                except Exception:
+                    logger.exception("Knowledge graph extraction failed")
+
+                # Tone analysis (opt-in)
+                try:
+                    from deadline_agent.awareness.tone_analyzer import analyze_outgoing_tone
+
+                    tone_signals = await analyze_outgoing_tone(session)
+                    if tone_signals:
+                        logger.info("Tone analysis: %d signal(s)", len(tone_signals))
+                except Exception:
+                    logger.exception("Tone analysis failed")
+
+                # Social graph builder (opt-in)
+                try:
+                    from deadline_agent.awareness.social_graph import build_social_graph
+
+                    sg_count = await build_social_graph(session)
+                    if sg_count:
+                        logger.info("Social graph: upserted %d relationship(s)", sg_count)
+                except Exception:
+                    logger.exception("Social graph build failed")
         except Exception:
             logger.exception("Behavioral analysis scheduler error")
 
@@ -247,6 +291,16 @@ async def moodle_scheduler() -> None:
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Start pipeline worker, schedulers, and file watcher on startup."""
     init_db()
+
+    # Initialize anticipatory trigger engine
+    if settings.enable_anticipatory_triggers:
+        from deadline_agent.events import event_bus
+        from deadline_agent.triggers import CompoundTriggerEngine
+
+        trigger_engine = CompoundTriggerEngine(SessionLocal)
+        trigger_engine.register(event_bus)
+        logger.info("Anticipatory trigger engine registered")
+
     tasks = [
         asyncio.create_task(run_pipeline(SessionLocal)),
         asyncio.create_task(alert_scheduler()),
@@ -257,6 +311,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         asyncio.create_task(gmail_watch_scheduler()),
         asyncio.create_task(moodle_scheduler()),
     ]
+
+    # Peak window nudge + follow-up staleness schedulers
+    if settings.enable_anticipatory_triggers:
+        from deadline_agent.triggers import (
+            follow_up_staleness_scheduler,
+            peak_window_nudge_scheduler,
+        )
+
+        tasks.append(
+            asyncio.create_task(
+                peak_window_nudge_scheduler(SessionLocal)
+            )
+        )
+        tasks.append(
+            asyncio.create_task(
+                follow_up_staleness_scheduler(SessionLocal)
+            )
+        )
 
     watcher = None
     if settings.enable_file_watcher and settings.watch_directories:
@@ -269,6 +341,44 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         watcher.start()
         tasks.append(asyncio.create_task(process_file_events(SessionLocal, file_event_queue)))
         logger.info("File watcher started for %d directories", len(settings.watch_directories))
+
+    # Phase 16: Ambient presence handlers
+    from deadline_agent.awareness.context_switch_handler import ContextSwitchHandler
+    from deadline_agent.events import event_bus as _event_bus
+
+    switch_handler = ContextSwitchHandler(SessionLocal)
+    switch_handler.register(_event_bus)
+
+    if settings.enable_proactive_interrupts:
+        from deadline_agent.awareness.proactive_interrupts import (
+            ProactiveInterruptHandler,
+        )
+
+        interrupt_handler = ProactiveInterruptHandler(SessionLocal)
+        interrupt_handler.register(_event_bus)
+
+    if settings.enable_session_briefing:
+        from deadline_agent.awareness.session_briefing import (
+            SessionBriefingGenerator,
+        )
+
+        briefing_gen = SessionBriefingGenerator(SessionLocal)
+        briefing_gen.register(_event_bus)
+
+    if settings.enable_meeting_briefing:
+        from deadline_agent.awareness.meeting_briefing import (
+            MeetingBriefingGenerator,
+            meeting_briefing_scheduler,
+        )
+
+        meeting_gen = MeetingBriefingGenerator(SessionLocal)
+        meeting_gen.register(_event_bus)
+        tasks.append(asyncio.create_task(meeting_briefing_scheduler(SessionLocal)))
+
+    # Configure ambient state idle threshold
+    from deadline_agent.awareness.ambient_state import ambient_state
+
+    ambient_state.idle_threshold_minutes = settings.session_idle_minutes
 
     logger.info("Pipeline worker and schedulers started")
     yield
@@ -319,6 +429,9 @@ async def gmail_webhook(
     logger.info("Gmail webhook: valid payload, calling handler")
     try:
         await gmail_ingester.handle_webhook(payload)
+        from deadline_agent.events import EMAIL_RECEIVED, Event, event_bus
+
+        await event_bus.emit(Event(type=EMAIL_RECEIVED, payload={}))
     except Exception:
         logger.exception("Gmail webhook handler failed")
     return {"status": "received"}

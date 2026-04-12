@@ -7,7 +7,7 @@ from deadline_agent.config import settings
 
 # Document-type tokens to strip from filenames (case-insensitive)
 _DOC_TYPE_TOKENS = {
-    "resume", "res", "cv", "coverletter", "cover", "letter",
+    "resume", "res", "cv", "cl", "coverletter", "cover", "letter",
     "application", "app", "draft", "final", "v1", "v2", "v3",
 }
 
@@ -42,6 +42,9 @@ _AGGREGATOR_NAMES = {
     "ziprecruiter", "monster", "dice", "hired", "otta",
     "wellfound", "simplyhired", "careerbuilder", "handshake",
     "twitchjobs", "people", "teamtailor", "teamtailor mail",
+    "greenhouse mail", "greenhouse", "myworkday", "workday",
+    "ashby", "ashbyhq", "lever", "icims", "smartrecruiters",
+    "the software engineer", "software engineer",
 }
 
 # Keywords that confirm an email is actually about a job (not a promo)
@@ -78,7 +81,14 @@ _STATUS_SIGNALS: dict[str, list[str]] = {
     "closed": [
         "rejected", "not moving forward", "unfortunately", "we regret",
         "position has been filled", "decided not to", "not selected",
-        "other candidates", "will not be moving",
+        "other candidates", "will not be moving", "not be proceeding",
+        "will not be advancing", "unable to move forward",
+        "we have decided to pursue", "move forward with other",
+        "not able to offer", "after careful consideration",
+        "while we were impressed", "not the right fit",
+        "we've decided to move", "we decided to move",
+        "pursuing other candidates", "won't be moving forward",
+        "after reviewing your qualifications",
     ],
 }
 
@@ -88,35 +98,64 @@ STATUS_ORDER = ["applied", "response", "interview", "offer", "closed"]
 def extract_company_from_filename(filename: str) -> str | None:
     """Extract company name from a recruiting filename.
 
-    Expected format: <OwnerName><Company><DocType>.ext
+    Preferred format: <OwnerName><Company><DocType>.ext
     Example: JudeElMasriGoogleResume.pdf → Google
-    """
-    owner = settings.owner_name
-    if not owner:
-        return None
 
+    Fallback: strips doc-type tokens from any recruiting filename.
+    Example: Google_Resume.pdf → Google
+    """
     stem = Path(filename).stem  # strip extension
 
-    # Strip owner name prefix (case-insensitive)
-    if not stem.lower().startswith(owner.lower()):
-        return None
-    remainder = stem[len(owner):]
+    # Strip copy indicators: "file (1)" → "file", "file (2)" → "file"
+    stem = re.sub(r"\s*\(\d+\)$", "", stem)
+
+    owner = settings.owner_name
+    remainder: str | None = None
+
+    # Try owner_name prefix first (preferred path)
+    if owner and stem.lower().startswith(owner.lower()):
+        remainder = stem[len(owner):]
+
+    if remainder:
+        # Strip leading/trailing underscores, hyphens, spaces
+        remainder = remainder.strip("_- ")
 
     if not remainder:
-        return None
+        # Fallback: use entire stem, strip doc-type tokens from both ends
+        remainder = stem
 
-    # Strip doc-type suffix by splitting on camelCase boundaries
-    # then removing known doc-type tokens from the end
-    tokens = _split_camel_case(remainder)
+    # Split on camelCase boundaries and underscores/hyphens
+    remainder = remainder.replace("_", " ").replace("-", " ")
+    tokens = []
+    for part in remainder.split():
+        tokens.extend(_split_camel_case(part))
+
+    # Split doc-type abbreviations fused to the end of tokens (e.g. "IXLCL" → "IXL" + "CL")
+    expanded: list[str] = []
+    for token in tokens:
+        split = False
+        for dt in _DOC_TYPE_TOKENS:
+            if len(token) > len(dt) and token.lower().endswith(dt):
+                expanded.append(token[: -len(dt)])
+                expanded.append(token[-len(dt) :])
+                split = True
+                break
+        if not split:
+            expanded.append(token)
+    tokens = expanded
+
     # Remove trailing doc-type tokens
     while tokens and tokens[-1].lower() in _DOC_TYPE_TOKENS:
         tokens.pop()
+    # Remove leading doc-type tokens too
+    while tokens and tokens[0].lower() in _DOC_TYPE_TOKENS:
+        tokens.pop(0)
 
     if not tokens:
         return None
 
     company = " ".join(tokens)
-    return company if company else None
+    return _clean_company_name(company)
 
 
 def _split_camel_case(text: str) -> list[str]:
@@ -166,6 +205,20 @@ def _extract_company_from_subject(subject: str, snippet: str = "") -> str | None
     patterns = [
         # "your application was sent to <Company>"
         r"application\s+(?:was\s+)?sent\s+to\s+(.+?)(?:\s*[-–—.|,!]|$)",
+        # "You applied to <Title> - <Company>" (Indeed format)
+        r"applied to\s+.+?\s*[-–—]\s*([A-Z][A-Za-z\s&.]+?)(?:\s*[!.,]|$)",
+        # "<Company> has received your application"
+        r"([A-Z][A-Za-z\s&.]+?)\s+has\s+received\s+your\s+application",
+        # "Your application to <Title> at <Company>" / "application for <Title> at <Company>"
+        r"application\s+(?:to|for)\s+.+?\s+at\s+([A-Z][A-Za-z\s&.]+?)(?:\s*[!.,]|$)",
+        # "<Company> Application Update" or "<Company> | Application"
+        r"^([A-Z][A-Za-z\s&.]+?)\s*(?:\||[-��—])\s*(?:Application|Update|Thank)",
+        # "Update on Your Application for ... at <Company>" (Ashby pattern)
+        r"(?:opportunity|role|position)\s+(?:at|with)\s+([A-Z][A-Za-z\s&.]+?)(?:\.|,|$)",
+        # "Thank you for applying to <Company>"
+        r"(?:applying|applied|application)\s+to\s+([A-Z][A-Za-z\s&.]+?)(?:\s*[!.,]|\s+for\b|$)",
+        # "your interest in <Company>"
+        r"interest\s+in\s+([A-Z][A-Za-z\s&.]+?)(?:\s*[!.,]|$)",
         # "application at/with/to <Company>"
         r"(?:application|applied|interview)\s+(?:at|with|to|from)\s+([A-Z][A-Za-z\s&]+?)(?:\s*[-–—.|,!]|\s+for\b|$)",
         # generic "at/with <Company>"
@@ -185,6 +238,25 @@ _NOISE_WORDS = {
     "this", "that", "time", "us", "me", "you", "your", "the", "a", "an",
     "it", "is", "are", "was", "we", "our", "they", "them", "their",
     "should", "check", "out", "here", "there", "just", "now",
+    "team", "for", "in", "on", "to", "and", "or", "of", "with",
+}
+
+# Verb prefixes that leak into company names from snippet text
+_VERB_PREFIXES = re.compile(
+    r"^(?:joining|applying|regarding|your|our|the|about|re)\s+",
+    re.IGNORECASE,
+)
+
+# Job title fragments that are not company names
+_JOB_TITLE_FRAGMENTS = {
+    "software engineer", "data scientist", "product manager",
+    "frontend engineer", "backend engineer", "full stack",
+    "machine learning", "devops engineer", "site reliability",
+    "engineering manager", "technical program", "solutions architect",
+    "data engineer", "cloud engineer", "security engineer",
+    "mobile engineer", "ios engineer", "android engineer",
+    "staff engineer", "senior engineer", "principal engineer",
+    "swe", "sde", "mle",
 }
 
 
@@ -196,6 +268,8 @@ def _clean_company_name(name: str) -> str | None:
     name = re.sub(r"^(?:Hi|Hello|Dear|Hey)\s+\w+\s*[-–—,]?\s*", "", name, flags=re.IGNORECASE)
     # Remove "you should check out" prefixes
     name = re.sub(r"^(?:you\s+should\s+check\s+out|check\s+out)\s+", "", name, flags=re.IGNORECASE)
+    # Strip verb prefixes that leak from snippet text ("joining Borderless" → "Borderless")
+    name = _VERB_PREFIXES.sub("", name)
     name = name.strip()
 
     if not name:
@@ -206,8 +280,48 @@ def _clean_company_name(name: str) -> str | None:
     if all(w in _NOISE_WORDS for w in words):
         return None
 
-    # Reject if too short or doesn't start with a capital letter (for extracted names)
-    if len(name) <= 2:
+    # Reject pure numbers, single characters, or very short names
+    if len(name) <= 2 or name.isdigit():
+        return None
+
+    # Reject names that are just doc-type tokens that slipped through
+    if name.lower() in _DOC_TYPE_TOKENS:
+        return None
+
+    # Reject names that look like version/copy suffixes
+    if re.match(r"^\(\d+\)$|^\d+$|^[A-Z]$", name):
+        return None
+
+    # Reject if the name contains the user's owner_name (leaked from filename/email)
+    owner = settings.owner_name
+    if owner and owner.lower() in name.lower():
+        # Strip the owner name and re-check what remains
+        stripped = re.sub(re.escape(owner), "", name, flags=re.IGNORECASE).strip()
+        if not stripped or len(stripped) <= 2:
+            return None
+        name = stripped
+
+    # Reject job title fragments that aren't company names
+    if name.lower() in _JOB_TITLE_FRAGMENTS:
+        return None
+
+    # Reject if the name is a recruiting keyword (signal, not a company)
+    if name.lower() in {s.lower() for s in _JOB_CONTEXT_SIGNALS}:
+        return None
+
+    # Reject if every word is a noise word, signal word, or job title fragment
+    # e.g. "Application for Software Engineer" → all non-company words
+    _title_words = set()
+    for frag in _JOB_TITLE_FRAGMENTS:
+        _title_words.update(frag.split())
+    _all_reject_words = (
+        _NOISE_WORDS
+        | {s.lower() for s in _JOB_CONTEXT_SIGNALS}
+        | _JOB_TITLE_FRAGMENTS
+        | _title_words
+        | _DOC_TYPE_TOKENS
+    )
+    if all(w in _all_reject_words for w in words):
         return None
 
     return name
@@ -281,6 +395,87 @@ def _extract_domain(sender: str) -> str | None:
     if m:
         return m.group(1).lower()
     return None
+
+
+def extract_resume_variant(filename: str) -> str | None:
+    """Identify which resume variant a file represents.
+
+    Strips company name and doc-type tokens, leaving the variant identifier.
+    e.g. "JudeElMasriGoogleResumeSWE.pdf" → "swe"
+         "resume_v2.pdf" → "v2"
+         "JudeElMasriGoogleResume.pdf" → None (no variant)
+    """
+    stem = Path(filename).stem.lower()
+
+    # Must be a resume/cv file
+    resume_indicators = {"resume", "res", "cv"}
+    if not any(ind in stem for ind in resume_indicators):
+        return None
+
+    # Strip owner name
+    owner = settings.owner_name
+    if owner:
+        stem = stem.replace(owner.lower(), "")
+
+    # Remove all doc-type tokens and known fragments
+    tokens = re.split(r"[_\-\s]+", stem)
+    # Also split camelCase
+    expanded: list[str] = []
+    for t in tokens:
+        expanded.extend(p.lower() for p in _split_camel_case(t))
+
+    # Remove doc-type tokens and company-like tokens
+    variant_tokens = [
+        t for t in expanded
+        if t and t not in _DOC_TYPE_TOKENS and len(t) <= 10
+        and not t.isdigit()
+        and t not in {"resume", "cv", "cover", "letter", "pdf", "docx"}
+    ]
+
+    # Common variant patterns: v1, v2, swe, data, ml, pm, general
+    _VARIANT_PATTERNS = {"v1", "v2", "v3", "v4", "swe", "data", "ml", "pm",
+                         "infra", "general", "tech", "quant", "finance",
+                         "backend", "frontend", "fullstack", "devops"}
+    for t in variant_tokens:
+        if t in _VARIANT_PATTERNS or re.match(r"v\d+", t):
+            return t
+
+    return None
+
+
+def infer_application_method(signals: list[dict], source: str) -> str:
+    """Determine how an application was submitted.
+
+    Returns: "direct", "referral", "aggregator", or "career_fair".
+    """
+    all_text = " ".join(
+        s.get("summary", "") for s in signals
+    ).lower()
+
+    if any(w in all_text for w in ("referral", "referred", "recommendation")):
+        return "referral"
+    if any(w in all_text for w in ("career fair", "info session", "campus event")):
+        return "career_fair"
+
+    # Check source signals for aggregator platforms
+    for s in signals:
+        summary = s.get("summary", "").lower()
+        if any(agg in summary for agg in (
+            "linkedin", "indeed", "glassdoor", "handshake",
+            "wellfound", "ziprecruiter", "lensa", "jobright",
+        )):
+            return "aggregator"
+
+    if source == "email":
+        # Check if any signal mentions a platform
+        for s in signals:
+            summary = s.get("summary", "").lower()
+            if any(plat in summary for plat in (
+                "greenhouse", "lever", "workday", "ashby", "icims",
+            )):
+                return "direct"
+
+    return "direct"
 
 
 def _domain_to_company(domain: str) -> str | None:

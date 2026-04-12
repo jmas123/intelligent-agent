@@ -8,6 +8,7 @@ from datetime import datetime
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from deadline_agent.config import settings
 from deadline_agent.models import (
     BehavioralPattern,
     FileActivity,
@@ -453,6 +454,18 @@ def run_all_analyses(session: Session) -> list[BehavioralPattern]:
     """Run all pattern analyses and upsert results. Returns all updated patterns."""
     all_patterns: list[BehavioralPattern] = []
 
+    # Phase 18: Focus quality analyses
+    from deadline_agent.awareness.focus_quality import (
+        analyze_focus_quality,
+        analyze_session_fragmentation,
+    )
+
+    # Phase 24: Task affect + energy proxy
+    from deadline_agent.awareness.task_affect import (
+        classify_task_affect,
+        compute_energy_proxy,
+    )
+
     for analyze_fn in [
         analyze_effort_accuracy,
         analyze_peak_hours,
@@ -460,12 +473,26 @@ def run_all_analyses(session: Session) -> list[BehavioralPattern]:
         analyze_session_duration,
         analyze_procrastination,
         analyze_work_by_time,
+        analyze_focus_quality,
+        analyze_session_fragmentation,
+        classify_task_affect,
+        compute_energy_proxy,
     ]:
         try:
             patterns = analyze_fn(session)
             all_patterns.extend(patterns)
         except Exception:
             logger.exception("Pattern analysis failed: %s", analyze_fn.__name__)
+
+    # Phase 25: Recruiting intelligence
+    if settings.recruiting_analytics_enabled:
+        try:
+            from deadline_agent.behavioral.recruiting_analyzer import run_recruiting_analyses
+
+            recruiting_patterns = run_recruiting_analyses(session)
+            all_patterns.extend(recruiting_patterns)
+        except Exception:
+            logger.exception("Recruiting analysis failed")
 
     logger.info("Pattern analysis complete: %d pattern(s) updated", len(all_patterns))
 

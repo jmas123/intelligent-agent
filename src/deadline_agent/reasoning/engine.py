@@ -16,7 +16,11 @@ logger = logging.getLogger(__name__)
 
 REASONING_SYSTEM_PROMPT = (
     "You are a proactive academic deadline assistant. Analyze the student's current state "
-    "and generate actionable insights. Focus on:\n"
+    "and generate actionable insights.\n\n"
+    "If an 'ABOUT YOU' identity section is present, use it to deeply personalize your "
+    "recommendations. Reference the student's known patterns, blind spots, and values "
+    "by name — don't rediscover what the system already knows about them.\n\n"
+    "Focus on:\n"
     "- Deadlines approaching with no work detected\n"
     "- Overdue tasks that need attention\n"
     "- Workload spikes (multiple things due close together)\n"
@@ -26,12 +30,27 @@ REASONING_SYSTEM_PROMPT = (
     "- When a life context is active (e.g., recruiting season, exam period), prioritize "
     "recommendations accordingly. During exam season, deprioritize non-academic tasks. "
     "During recruiting, ensure interview prep is surfaced prominently.\n\n"
+    "- When causal analysis is provided, use it to explain WHY a task is at risk, "
+    "not just that it is. Reference the student's actual lead times and effort patterns.\n"
+    "- When priority tradeoffs are provided, use them to rank recommendations. "
+    "Cross-domain comparisons (school vs recruiting vs personal) should influence "
+    "what you suggest the student focuses on first.\n"
+    "- When cross-semester patterns are available, reference them explicitly. "
+    "Compare current behavior to past semesters and call out regressions or improvements.\n"
+    "- When workload spike predictions are present, lead with them as early warnings.\n"
+    "- When TASK AFFECT labels are present, use them to personalize recommendations. "
+    "For avoidance patterns, suggest 'start with just 10 minutes to break the seal'. "
+    "For anxiety patterns, ask 'what specifically feels hard about this?'. "
+    "For enjoyment patterns, suggest leveraging that energy as a warm-up before harder tasks. "
+    "Reference the specific affect label and evidence.\n\n"
     "Be specific and actionable. Reference task names and dates. "
     "Generate 1-5 insights, prioritized by importance."
 )
 
 DIGEST_SYSTEM_PROMPT = (
     "You are a proactive academic deadline assistant writing a morning briefing.\n\n"
+    "If an 'ABOUT YOU' identity section is present, let it shape your tone and advice. "
+    "You know this person — speak to their specific patterns and tendencies.\n\n"
     "RULES:\n"
     "- Lead with the single most important thing the student needs to know right now.\n"
     "- Group related deadlines instead of listing them one by one "
@@ -48,13 +67,19 @@ DIGEST_SYSTEM_PROMPT = (
     "- If a life context is active, lead with it: 'You're in exam season with 4 exams in "
     "the next 10 days' or 'Recruiting is active — you have 3 interviews this week'. "
     "Let this color your tone and priorities.\n"
+    "- If causal analysis or tradeoff context is available, weave it in naturally. "
+    "Don't just warn — explain why something matters and what the recovery path looks like.\n"
+    "- If TASK AFFECT data is available, weave it in naturally. Don't just list affects — "
+    "use them to explain task order. 'Start with the project since you enjoy those — "
+    "then tackle the essay you've been avoiding.'\n"
     "- Be conversational and direct, not formal."
 )
 
 QUERY_SYSTEM_PROMPT = (
     "You are a helpful academic deadline assistant. Answer the student's question "
     "based on their current state, which includes tasks, deadlines, Google Calendar "
-    "events, file activity, behavioral patterns, and email when relevant. "
+    "events, file activity, behavioral patterns, identity profile, and email when relevant. "
+    "If an 'ABOUT YOU' identity section is present, use it to personalize your answer. "
     "If RECENT EMAILS are included in the state, use them to answer email-related "
     "questions directly. Be concise and specific.\n\n"
     "IMPORTANT — use behavioral patterns prescriptively:\n"
@@ -69,8 +94,31 @@ QUERY_SYSTEM_PROMPT = (
     "- If calendar events are listed in the state, use them to answer calendar questions.\n"
     "- If a life context is present (e.g., recruiting season, exam period), factor it into "
     "answers. During exam season, suggest study-focused scheduling. During recruiting, "
-    "prioritize interview prep."
+    "prioritize interview prep.\n"
+    "- If TASK AFFECT labels are present, use them to personalize time management advice. "
+    "For avoidance tasks, suggest micro-commitments. For anxiety tasks, suggest breaking "
+    "them into smaller pieces. Reference the data: 'you typically start essays in the last "
+    "10% of available time'."
 )
+
+
+def _log_training_data(session: Any, input_prompt: str, output_text: str, prompt_type: str, model: str) -> None:
+    """Log LLM I/O for LoRA training data (opt-in via config)."""
+    if not settings.lora_log_training_data:
+        return
+    try:
+        from deadline_agent.models import DigestLog
+
+        log_entry = DigestLog(
+            input_prompt=input_prompt,
+            output_text=output_text,
+            model_used=str(model) if model else "unknown",
+            prompt_type=prompt_type,
+        )
+        session.add(log_entry)
+        session.commit()
+    except Exception:
+        logger.warning("Failed to log %s training data", prompt_type, exc_info=True)
 
 
 class InsightOutput(BaseModel):
@@ -92,7 +140,7 @@ async def _call_ollama(system: str, user: str, schema: dict[str, Any]) -> str:
     """Call Ollama with structured output. Raises ExtractionError on failure."""
     from ollama import AsyncClient
 
-    model = settings.reasoning_model or "llama3.2:3b"
+    model = settings.lora_reasoning_model or settings.reasoning_model or settings.extraction_model
     client = AsyncClient(host=settings.ollama_base_url)
     try:
         response = await client.chat(
@@ -271,6 +319,42 @@ async def generate_insights(session: Any) -> list[Insight]:
         stored.append(insight)
 
     logger.info("Generated %d insights", len(stored))
+
+    # Log insight I/O for LoRA training data
+    model = settings.lora_reasoning_model or settings.reasoning_model or settings.extraction_model
+    _log_training_data(session, prompt, raw, "insight", model)
+
+    # Generate recovery plans for overdue tasks (only when overdue, not just unworked)
+    has_overdue = any(i.type == "overdue_cluster" for i in insights_data)
+    if has_overdue and snapshot.overdue:
+        try:
+            from deadline_agent.reasoning.recovery import generate_recovery_plans
+
+            plans = await generate_recovery_plans(
+                session, snapshot.overdue, [], snapshot.behavioral_patterns
+            )
+            for plan in plans[:3]:
+                blocks = "; ".join(
+                    f"{b.day} {b.time_window}: {b.action}" for b in plan.daily_blocks
+                )
+                content = (
+                    f"Recovery plan for {plan.task_title} ({plan.status}): "
+                    f"~{plan.estimated_hours_remaining:.1f}h remaining. "
+                    f"{blocks}"
+                )
+                if plan.tradeoff_note:
+                    content += f" Note: {plan.tradeoff_note}"
+                recovery_insight = repo.create(
+                    {
+                        "type": "recovery_plan",
+                        "content": content,
+                        "related_task_ids": "[]",
+                    }
+                )
+                stored.append(recovery_insight)
+        except Exception:
+            logger.exception("Recovery plan generation failed during insight cycle")
+
     return stored
 
 
@@ -344,6 +428,9 @@ async def generate_summary(session: Any) -> str | None:
 
     if result is not None:
         digest_cache.set(cache_key, result)
+        # Log digest I/O for LoRA training data
+        digest_model = settings.lora_reasoning_model or settings.reasoning_model or settings.extraction_model
+        _log_training_data(session, prompt, result, "digest", digest_model)
     return result
 
 

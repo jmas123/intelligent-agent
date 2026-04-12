@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -58,16 +59,26 @@ class TaskRepository:
         if task is None:
             return None
         task.status = status
+
+        # Mark linked extraction logs as rejected for LoRA training data quality
+        if status == "dismissed":
+            from deadline_agent.models import ExtractionLog
+
+            logs = self._session.execute(
+                select(ExtractionLog).where(ExtractionLog.task_id == task_id)
+            ).scalars().all()
+            for log in logs:
+                log.accepted = False
+
         self._session.commit()
         return task
 
     def list_tasks_due_today(self) -> list[Task]:
-        """Return pending tasks due today."""
-        now = datetime.now(UTC)
-        start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-        end = (
-            now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-        ).isoformat()
+        """Return pending tasks due today (user's local timezone)."""
+        local_now = datetime.now(UTC).astimezone(ZoneInfo("America/New_York"))
+        sod = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        start = sod.astimezone(UTC).isoformat()
+        end = (sod + timedelta(days=1)).astimezone(UTC).isoformat()
         stmt = (
             select(Task)
             .where(Task.status == "pending")

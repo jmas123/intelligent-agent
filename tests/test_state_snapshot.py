@@ -37,9 +37,14 @@ def test_build_snapshot_empty(session: Session) -> None:
 
 
 def test_build_snapshot_with_tasks(session: Session) -> None:
-    _add_task(session, hours_until_due=4, raw_hash="today1")  # due today
+    from zoneinfo import ZoneInfo
+    # Use explicit local-day times to avoid day-boundary issues at late hours
+    local_now = datetime.now(UTC).astimezone(ZoneInfo("America/New_York"))
+    later_today = local_now.replace(hour=23, minute=30, second=0, microsecond=0)
+    hours_to_later = (later_today - local_now).total_seconds() / 3600
+    _add_task(session, hours_until_due=int(hours_to_later) or 1, raw_hash="today1")  # due today
     _add_task(session, hours_until_due=72, raw_hash="week1")  # due this week
-    _add_task(session, hours_until_due=-24, raw_hash="overdue1")  # overdue
+    _add_task(session, hours_until_due=-36, raw_hash="overdue1")  # overdue (yesterday)
 
     snapshot = build_state_snapshot(session)
     assert snapshot.total_pending == 3
@@ -85,8 +90,13 @@ def test_build_snapshot_worked_deadline_excluded(session: Session) -> None:
 
 
 def test_to_prompt_format(session: Session) -> None:
-    _add_task(session, hours_until_due=4, raw_hash="prompt1")
-    _add_task(session, hours_until_due=-12, raw_hash="prompt2")
+    from zoneinfo import ZoneInfo
+    # Create a task due later today (in local TZ) to ensure DUE TODAY appears
+    local_now = datetime.now(UTC).astimezone(ZoneInfo("America/New_York"))
+    later_today = local_now.replace(hour=23, minute=30, second=0, microsecond=0)
+    hours_to_later = max(1, int((later_today - local_now).total_seconds() / 3600))
+    _add_task(session, hours_until_due=hours_to_later, raw_hash="prompt1")
+    _add_task(session, hours_until_due=-36, raw_hash="prompt2")  # yesterday = overdue
 
     snapshot = build_state_snapshot(session)
     prompt = snapshot.to_prompt()

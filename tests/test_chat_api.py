@@ -106,17 +106,23 @@ async def test_list_tasks_returns_tasks(chat_client: AsyncClient, chat_session: 
 
 @pytest.mark.asyncio
 async def test_list_tasks_due_today(chat_client: AsyncClient, chat_session: Session) -> None:
-    now = datetime.now(UTC)
+    from zoneinfo import ZoneInfo
+    # Use noon today in local TZ to avoid day-boundary issues at late hours
+    local_now = datetime.now(UTC).astimezone(ZoneInfo("America/New_York"))
+    noon_today = local_now.replace(hour=12, minute=0, second=0, microsecond=0)
+    if noon_today < local_now:
+        noon_today = local_now.replace(hour=23, minute=0, second=0, microsecond=0)
+    due_today_utc = noon_today.astimezone(UTC)
     _make_task(
         chat_session,
         title="Today",
-        due_date_iso=(now + timedelta(hours=2)).isoformat(),
+        due_date_iso=due_today_utc.isoformat(),
         raw_hash="today-1",
     )
     _make_task(
         chat_session,
         title="Next Week",
-        due_date_iso=(now + timedelta(days=5)).isoformat(),
+        due_date_iso=(datetime.now(UTC) + timedelta(days=5)).isoformat(),
         raw_hash="week-1",
     )
 
@@ -227,17 +233,20 @@ async def test_context_empty(chat_client: AsyncClient) -> None:
 
 @pytest.mark.asyncio
 async def test_context_with_due_today(chat_client: AsyncClient, chat_session: Session) -> None:
-    now = datetime.now(UTC)
+    from zoneinfo import ZoneInfo
+    local_now = datetime.now(UTC).astimezone(ZoneInfo("America/New_York"))
+    later_today = local_now.replace(hour=23, minute=30, second=0, microsecond=0)
+    due_utc = later_today.astimezone(UTC)
     _make_task(
         chat_session,
         title="Due Tonight",
-        due_date_iso=(now + timedelta(hours=3)).isoformat(),
+        due_date_iso=due_utc.isoformat(),
         raw_hash="ctx-today",
     )
     _make_task(
         chat_session,
         title="Due Next Week",
-        due_date_iso=(now + timedelta(days=5)).isoformat(),
+        due_date_iso=(datetime.now(UTC) + timedelta(days=5)).isoformat(),
         raw_hash="ctx-week",
     )
 
@@ -276,17 +285,21 @@ async def test_context_with_overdue(chat_client: AsyncClient, chat_session: Sess
 
 
 def test_repo_list_tasks_due_today(session: Session) -> None:
-    now = datetime.now(UTC)
+    from zoneinfo import ZoneInfo
+    local_now = datetime.now(UTC).astimezone(ZoneInfo("America/New_York"))
+    later_today = local_now.replace(hour=23, minute=30, second=0, microsecond=0)
+    due_today_utc = later_today.astimezone(UTC)
+    tomorrow_utc = (later_today + timedelta(days=1)).astimezone(UTC)
     _make_task(
         session,
         title="Today",
-        due_date_iso=(now + timedelta(hours=2)).isoformat(),
+        due_date_iso=due_today_utc.isoformat(),
         raw_hash="r-today",
     )
     _make_task(
         session,
         title="Tomorrow",
-        due_date_iso=(now + timedelta(days=1, hours=2)).isoformat(),
+        due_date_iso=tomorrow_utc.isoformat(),
         raw_hash="r-tmrw",
     )
 

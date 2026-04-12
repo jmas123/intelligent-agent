@@ -71,6 +71,15 @@ def compute_weekly_stats(session: Session) -> dict[str, Any]:
         by_course.setdefault(c, {"done": 0, "slipped": 0, "upcoming": 0})
         by_course[c]["upcoming"] += 1
 
+    # Phase 25: Recruiting stats
+    recruiting_stats: dict[str, Any] = {}
+    try:
+        from deadline_agent.behavioral.recruiting_report import compute_recruiting_stats
+
+        recruiting_stats = compute_recruiting_stats(session)
+    except Exception:
+        pass
+
     return {
         "done_count": len(done),
         "slipped_count": len(slipped),
@@ -78,6 +87,7 @@ def compute_weekly_stats(session: Session) -> dict[str, Any]:
         "by_course": by_course,
         "done_tasks": [t.title for t in done],
         "slipped_tasks": [t.title for t in slipped],
+        "recruiting": recruiting_stats,
     }
 
 
@@ -110,6 +120,26 @@ def _stats_to_prompt(stats: dict[str, Any]) -> str:
             s = data.get("slipped", 0)
             u = data.get("upcoming", 0)
             lines.append(f"  {course}: {d} done, {s} slipped, {u} upcoming")
+
+    # Phase 25: Recruiting stats
+    recruiting = stats.get("recruiting", {})
+    if recruiting and recruiting.get("active_count", 0) > 0:
+        lines.append("")
+        lines.append("Recruiting pipeline:")
+        lines.append(f"  Active applications: {recruiting.get('active_count', 0)}")
+        by_status = recruiting.get("by_status", {})
+        if by_status:
+            parts = [f"{s}: {c}" for s, c in by_status.items() if c > 0]
+            lines.append(f"  Status: {', '.join(parts)}")
+        rate = recruiting.get("response_rate")
+        if rate is not None:
+            lines.append(f"  Response rate: {rate:.0%}")
+        new_this_week = recruiting.get("new_this_week", 0)
+        if new_this_week:
+            lines.append(f"  New this week: {new_this_week}")
+        changes = recruiting.get("status_changes_this_week", 0)
+        if changes:
+            lines.append(f"  Status changes this week: {changes}")
 
     return "\n".join(lines)
 
@@ -158,3 +188,131 @@ async def generate_weekly_review(session: Session) -> str:
 
     weekly_review_cache.set(cache_key, result)
     return result
+
+
+async def persist_weekly_snapshot(session: Session) -> Any:
+    """Compute, narrate, and persist the current week's snapshot.
+
+    Called by the weekly review scheduler to store durable weekly summaries
+    for narrative continuity and longitudinal reasoning.
+    """
+    import json as _json
+
+    from deadline_agent.models import FileActivity, WorkSession
+    from deadline_agent.store.snapshot_repository import WeeklySnapshotRepository
+
+    now = datetime.now(UTC)
+
+    # Determine week boundaries (Monday-Sunday)
+    days_since_monday = now.weekday()
+    monday = (now - timedelta(days=days_since_monday)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    sunday = monday + timedelta(days=6)
+    week_start = monday.strftime("%Y-%m-%d")
+    week_end = sunday.strftime("%Y-%m-%d")
+
+    # Compute stats
+    stats = compute_weekly_stats(session)
+
+    # Sum work session minutes for the week
+    week_ago = monday.isoformat()
+    work_sessions = list(
+        session.scalars(
+            select(WorkSession).where(WorkSession.started_at >= week_ago)
+        ).all()
+    )
+    total_work_minutes = sum(ws.duration_minutes for ws in work_sessions)
+
+    # Capture active life contexts
+    life_contexts_data: list[dict[str, str]] = []
+    try:
+        from deadline_agent.store.context_repository import LifeContextRepository
+
+        ctx_repo = LifeContextRepository(session)
+        for ctx in ctx_repo.get_active():
+            life_contexts_data.append({
+                "season": ctx.season,
+                "label": ctx.label or "",
+            })
+    except Exception:
+        pass
+
+    # Health signals
+    health_signals: dict[str, object] = {}
+    try:
+        recent_ts = list(
+            session.scalars(
+                select(FileActivity.modified_at).where(
+                    FileActivity.created_at >= week_ago
+                )
+            ).all()
+        )
+        from zoneinfo import ZoneInfo
+
+        _est = ZoneInfo("America/New_York")
+        late_dates: set[str] = set()
+        for ts in recent_ts:
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            local = ts.astimezone(_est)
+            if 1 <= local.hour <= 4:
+                late_dates.add(local.strftime("%Y-%m-%d"))
+        health_signals = {"late_night_days": len(late_dates)}
+    except Exception:
+        pass
+
+    # Sleep inference
+    try:
+        from deadline_agent.awareness.physical_inference import infer_sleep_signals
+
+        sleep_signals = infer_sleep_signals(session)
+        health_signals.update(sleep_signals)
+    except Exception:
+        pass
+
+    # Absence detection
+    try:
+        from deadline_agent.awareness.absence_detector import detect_absences
+
+        absence_signals = detect_absences(session)
+        if absence_signals:
+            health_signals["absence_signals"] = absence_signals
+    except Exception:
+        pass
+
+    # Determine semester week number
+    semester_week: int | None = None
+    try:
+        from deadline_agent.reasoning.context_window import _get_current_semester_week
+
+        semester_week = _get_current_semester_week(session)
+    except Exception:
+        pass
+
+    # Generate narrative
+    narrative = await generate_weekly_review(session)
+
+    # Persist
+    repo = WeeklySnapshotRepository(session)
+    snapshot = repo.upsert(
+        week_start,
+        {
+            "week_end": week_end,
+            "tasks_completed": stats["done_count"],
+            "tasks_slipped": stats["slipped_count"],
+            "tasks_upcoming": stats["upcoming_count"],
+            "total_work_minutes": total_work_minutes,
+            "stats_json": _json.dumps({
+                "by_course": stats.get("by_course", {}),
+                "recruiting": stats.get("recruiting", {}),
+            }),
+            "narrative": narrative,
+            "life_contexts_json": _json.dumps(life_contexts_data),
+            "health_signals_json": _json.dumps(health_signals),
+            "semester_week_number": semester_week,
+        },
+    )
+
+    logger.info("Persisted weekly snapshot for %s", week_start)
+    return snapshot

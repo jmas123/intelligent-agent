@@ -137,6 +137,66 @@ body {
   font-weight: 500;
 }
 
+/* More menu */
+.tab-more-wrap {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.tab-more-wrap > .tab {
+  width: 100%;
+  flex: 1;
+}
+
+.tab-more-menu {
+  display: none;
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 160px;
+  background: rgba(34, 34, 38, 0.96);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-sm);
+  padding: 4px;
+  z-index: 100;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.tab-more-menu.open {
+  display: flex;
+  flex-direction: column;
+}
+
+.tab-more-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.12s;
+  text-align: left;
+}
+
+.tab-more-item:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.tab-more-item.active {
+  color: var(--accent-blue);
+  background: rgba(91, 156, 245, 0.1);
+}
+
 /* Content area */
 #content {
   flex: 1;
@@ -149,7 +209,7 @@ body {
   position: absolute;
   inset: 0;
   overflow-y: auto;
-  padding: 10px;
+  padding: 14px;
 }
 
 .panel.active {
@@ -202,7 +262,7 @@ body {
 .task-card {
   background: var(--bg-card);
   border-radius: var(--radius-sm);
-  padding: 10px 12px;
+  padding: 12px 14px;
   margin-bottom: 6px;
   border: 1px solid var(--border);
   transition: all 0.15s;
@@ -214,10 +274,10 @@ body {
 }
 
 .task-title {
-  font-size: 13px;
+  font-size: 13.5px;
   font-weight: 500;
-  line-height: 1.3;
-  margin-bottom: 4px;
+  line-height: 1.35;
+  margin-bottom: 2px;
 }
 
 .task-meta {
@@ -229,23 +289,19 @@ body {
 }
 
 .task-course {
-  background: rgba(91, 156, 245, 0.15);
+  background: rgba(91, 156, 245, 0.2);
   color: var(--accent-blue);
-  padding: 1px 6px;
+  padding: 2px 8px;
   border-radius: 4px;
-  font-size: 10px;
-  font-weight: 500;
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .task-due {
   font-size: 11px;
 }
 
-.task-urgency {
-  color: var(--accent-orange);
-  font-weight: 700;
-  letter-spacing: -1px;
-}
+/* urgency text badge removed — left-border color is the indicator */
 
 .task-actions {
   display: flex;
@@ -265,23 +321,26 @@ body {
 }
 
 .btn-done {
-  background: rgba(91, 245, 160, 0.1);
-  color: var(--accent-green);
-  border-color: rgba(91, 245, 160, 0.2);
+  background: rgba(91, 245, 160, 0.85);
+  color: #1a1a1e;
+  border-color: transparent;
+  font-weight: 600;
 }
 
 .btn-done:hover {
-  background: rgba(91, 245, 160, 0.2);
+  background: rgba(91, 245, 160, 1);
 }
 
 .btn-dismiss {
-  background: rgba(255, 255, 255, 0.04);
+  background: transparent;
   color: var(--text-muted);
+  border-color: transparent;
+  font-weight: 400;
 }
 
 .btn-dismiss:hover {
-  background: rgba(255, 255, 255, 0.08);
   color: var(--text-secondary);
+  text-decoration: underline;
 }
 
 .btn-approve {
@@ -306,7 +365,9 @@ body {
 
 /* Urgency accent colors on cards */
 .task-card.urgency-overdue {
-  border-left: 3px solid var(--accent-red);
+  border-left: 4px solid var(--accent-red);
+  background: rgba(56, 48, 48, 0.9);
+  box-shadow: 0 2px 8px rgba(245, 91, 91, 0.08);
 }
 
 .task-card.urgency-today {
@@ -315,6 +376,100 @@ body {
 
 .task-card.urgency-week {
   border-left: 3px solid var(--accent-blue);
+}
+
+/* Phase 24: Affect indicators */
+.task-card.affect-enjoyment { border-left: 3px solid var(--accent-green); }
+.task-card.affect-avoidance { border-left: 3px solid var(--accent-orange); }
+.task-card.affect-anxiety { border-left: 3px solid var(--accent-red); }
+
+.affect-badge {
+  font-size: 0.75em;
+  opacity: 0.7;
+  margin-right: 2px;
+}
+
+.affect-card {
+  background: var(--bg-card);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  margin-bottom: 6px;
+  border-left: 3px solid var(--border);
+}
+.affect-card.affect-enjoyment { border-left-color: var(--accent-green); }
+.affect-card.affect-avoidance { border-left-color: var(--accent-orange); }
+.affect-card.affect-anxiety { border-left-color: var(--accent-red); }
+
+.affect-type {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text-primary);
+  text-transform: capitalize;
+}
+.affect-detail {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+.affect-intervention {
+  font-size: 11px;
+  color: var(--accent-blue);
+  margin-top: 4px;
+  font-style: italic;
+}
+
+/* Due date line below title */
+.task-due-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+  font-weight: 500;
+}
+
+.task-countdown {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-secondary);
+}
+
+.task-countdown.urgent {
+  background: rgba(245, 91, 91, 0.15);
+  color: var(--accent-red);
+}
+
+/* Mode progress bar */
+.mode-progress-wrap {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mode-progress-bar {
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.mode-progress-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+.mode-progress-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
 }
 
 /* Empty state */
@@ -655,6 +810,36 @@ body {
 
 /* ── Recruiting Pipeline ── */
 
+.pipeline-filters {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.filter-btn {
+  flex: 1;
+  padding: 5px 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 150ms;
+}
+
+.filter-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+}
+
+.filter-btn.active {
+  background: rgba(91, 156, 245, 0.15);
+  border-color: var(--accent-blue);
+  color: var(--accent-blue);
+}
+
 .pipeline-summary {
   display: flex;
   gap: 8px;
@@ -835,4 +1020,533 @@ body {
 .refresh-pipeline-btn:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
+}
+
+/* ─── Phase 16: Mode Banner ─────────────────────────────── */
+
+.mode-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  background: rgba(48, 48, 54, 0.6);
+  border-left: 3px solid #888;
+  border-radius: 6px;
+  font-size: 11px;
+}
+
+.mode-season {
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: 0.5px;
+}
+
+.mode-label {
+  color: var(--text-secondary);
+  font-weight: 400;
+}
+
+/* ─── Phase 16: Ambient Ticker ───────────────────────────── */
+
+.ambient-ticker {
+  margin-bottom: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ambient-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  background: rgba(38, 38, 42, 0.5);
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  animation: ambientFadeIn 0.4s ease;
+}
+
+.ambient-category {
+  color: var(--accent-blue);
+  font-weight: 500;
+  text-transform: uppercase;
+  font-size: 9px;
+  min-width: 50px;
+}
+
+.ambient-body {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@keyframes ambientFadeIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ─── Phase 16: Voice Button ─────────────────────────────── */
+
+.voice-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  transition: all 200ms;
+  flex-shrink: 0;
+}
+
+.voice-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.voice-btn.recording {
+  background: #ff4a4a;
+  color: white;
+  border-color: #ff4a4a;
+  animation: voicePulse 1.2s infinite;
+}
+
+@keyframes voicePulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+/* ─── Simulation Results ─────────────────────────────── */
+
+.sim-result-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  margin-top: 8px;
+  animation: fadeIn 0.2s ease-out;
+}
+
+.sim-confidence {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  margin-bottom: 8px;
+}
+
+.sim-impacts {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.sim-impact {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 8px;
+  border-left: 3px solid var(--text-muted);
+  font-size: 11px;
+}
+
+.sim-domain {
+  font-weight: 600;
+  color: var(--text-primary);
+  min-width: 65px;
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.sim-impact-text {
+  color: var(--text-secondary);
+}
+
+.sim-projection {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.sim-recommendation {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--accent-green);
+  padding: 6px 8px;
+  background: rgba(91, 245, 160, 0.06);
+  border-radius: 6px;
+}
+
+/* ─── Identity Document ──────────────────────────────── */
+
+.identity-doc {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  padding: 8px 4px;
+}
+
+.identity-doc h2, .identity-doc .md-h {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 10px 0 4px;
+}
+
+/* ─── Knowledge Graph ────────────────────────────────── */
+
+.kg-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 0 8px;
+}
+
+.kg-entity {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 3px 10px;
+  font-size: 11px;
+  color: var(--text-primary);
+}
+
+.kg-entity small {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+/* ─── Recovery Plans ─────────────────────────────────── */
+
+.recovery-card {
+  background: rgba(245, 91, 91, 0.06);
+  border: 1px solid rgba(245, 91, 91, 0.15);
+  border-left: 3px solid var(--accent-red);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  margin-bottom: 6px;
+  animation: fadeIn 0.2s ease-out;
+}
+
+.recovery-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent-red);
+  margin-bottom: 4px;
+}
+
+.recovery-body {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+/* ─── Calendar Gaps ──────────────────────────────────── */
+
+.gaps-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.gap-block {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  background: rgba(91, 245, 160, 0.08);
+  border: 1px solid rgba(91, 245, 160, 0.15);
+  border-radius: 6px;
+  padding: 6px 10px;
+  min-width: 56px;
+}
+
+.gap-day {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--accent-green);
+  text-transform: uppercase;
+}
+
+.gap-time {
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+
+.gap-dur {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* ─── Negotiations ───────────────────────────────────── */
+
+.negotiation-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent-blue);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  margin-bottom: 6px;
+  animation: fadeIn 0.2s ease-out;
+}
+
+.negotiation-status {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--accent-blue);
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+}
+
+.negotiation-reply {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.negotiation-input {
+  display: flex;
+  gap: 6px;
+}
+
+.negotiation-input .form-input {
+  flex: 1;
+}
+
+/* ─── Weekly Snapshots ───────────────────────────────── */
+
+.snapshot-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  margin-bottom: 4px;
+  animation: fadeIn 0.2s ease-out;
+}
+
+.snapshot-week {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 2px;
+}
+
+.snapshot-stats {
+  display: flex;
+  gap: 10px;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.snapshot-events {
+  font-size: 10px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+/* ─── Life Context Manager ───────────────────────────── */
+
+.context-manager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.context-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(91, 156, 245, 0.12);
+  color: var(--accent-blue);
+  padding: 3px 8px;
+  border-radius: 12px;
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.context-remove {
+  background: none;
+  border: none;
+  color: var(--accent-blue);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 2px;
+  opacity: 0.6;
+}
+
+.context-remove:hover {
+  opacity: 1;
+}
+
+.context-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  width: 100%;
+  margin-top: 4px;
+}
+
+.context-form .form-input,
+.context-form .form-select {
+  font-size: 11px;
+  padding: 4px 8px;
+}
+
+/* ─── Goals / Decisions / Relationships forms ─────────── */
+
+.add-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+
+.form-input {
+  flex: 1;
+  min-width: 120px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  outline: none;
+}
+
+.form-input:focus {
+  border-color: var(--accent-blue);
+}
+
+.form-select {
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  outline: none;
+}
+
+.btn-sm {
+  padding: 3px 10px;
+  font-size: 11px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  transition: background 0.15s;
+  background: transparent;
+}
+
+.btn-sm.btn-approve {
+  color: var(--accent-green);
+  border-color: rgba(91, 245, 160, 0.2);
+}
+
+.btn-sm.btn-approve:hover {
+  background: rgba(91, 245, 160, 0.15);
+}
+
+.btn-sm.btn-reject {
+  color: var(--accent-red);
+  border-color: rgba(245, 91, 91, 0.2);
+}
+
+.btn-sm.btn-reject:hover {
+  background: rgba(245, 91, 91, 0.15);
+}
+
+/* Phase 25: Recruiting analytics */
+.analytics-section {
+  margin: 8px 0;
+  padding: 8px 0;
+  border-top: 1px solid var(--border-color);
+}
+
+.analytics-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 12px;
+}
+
+.analytics-label {
+  min-width: 80px;
+  color: var(--text-secondary);
+}
+
+.analytics-bar-bg {
+  flex: 1;
+  height: 6px;
+  background: var(--surface-color);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.analytics-bar {
+  height: 100%;
+  background: var(--accent-blue);
+  border-radius: 3px;
+  transition: width 0.3s;
+}
+
+.analytics-bar.fit-bar {
+  background: var(--accent-purple);
+}
+
+.analytics-value {
+  min-width: 70px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.analytics-alert {
+  background: rgba(255, 159, 67, 0.1);
+  border-left: 3px solid var(--accent-orange);
+  padding: 6px 10px;
+  margin: 6px 0;
+  font-size: 12px;
+  border-radius: 4px;
+  color: var(--text-primary);
+}
+
+.analytics-gap {
+  font-size: 12px;
+  padding: 2px 0;
+  color: var(--text-secondary);
+}
+
+.tier-badge {
+  display: inline-block;
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--surface-color);
+  color: var(--text-muted);
+  margin-left: 4px;
+  vertical-align: middle;
 }

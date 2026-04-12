@@ -122,6 +122,16 @@ async def fetch_events(
                         "start": start.get("dateTime") or start.get("date", ""),
                         "end": end.get("dateTime") or end.get("date", ""),
                         "location": item.get("location", ""),
+                        "description": item.get("description", ""),
+                        "attendees": [
+                            {
+                                "email": a.get("email", ""),
+                                "displayName": a.get("displayName", ""),
+                                "responseStatus": a.get("responseStatus", ""),
+                                "self": a.get("self", False),
+                            }
+                            for a in item.get("attendees", [])
+                        ],
                     })
 
             # Sort by start time

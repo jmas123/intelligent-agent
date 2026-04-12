@@ -6,6 +6,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from deadline_agent.config import settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -47,6 +49,12 @@ async def _process_item(
         text = f"{subject} {item.raw_content}"
         if has_recruiting_signal(text):
             company = extract_company_from_email(sender, subject, item.raw_content)
+            if not company:
+                logger.warning(
+                    "Recruiting signal detected but company extraction failed: subject=%r sender=%r",
+                    subject[:100],
+                    sender,
+                )
             if company:
                 from deadline_agent.store.recruiting_repository import (
                     RecruitingRepository,
@@ -65,11 +73,28 @@ async def _process_item(
                     )
                     new_status = infer_status(app.status, text)
                     if new_status != app.status:
+                        old_status = app.status
                         repo.advance_status(app.id, new_status, signal={
                             "type": "status_change",
                             "date": "",
-                            "summary": f"{app.status} → {new_status}: {subject[:80]}",
+                            "summary": f"{old_status} → {new_status}: {subject[:80]}",
                         })
+                        from deadline_agent.events import (
+                            RECRUITING_STATUS_CHANGED,
+                            Event,
+                            event_bus,
+                        )
+
+                        await event_bus.emit(Event(
+                            type=RECRUITING_STATUS_CHANGED,
+                            payload={
+                                "company": company,
+                                "old_status": old_status,
+                                "new_status": new_status,
+                                "subject": subject[:100],
+                                "app_id": app.id,
+                            },
+                        ))
 
     # Moodle iCal events are inherently deadline-relevant — skip pre-filter
     if item.source != "moodle" and not should_process(item):
@@ -86,6 +111,12 @@ async def _process_item(
                 return False
 
     extractor = FallbackExtractor()
+
+    # Capture the prompt for training data logging before extraction
+    extraction_prompt: str | None = None
+    if settings.lora_log_training_data:
+        extraction_prompt = extractor._ollama._build_prompt(item)
+
     result = await extractor.extract(item)
     if result is None:
         return False
@@ -121,6 +152,34 @@ async def _process_item(
         task = repo.create_task(task_data)
         if task is not None:
             logger.info("Stored task: %s (confidence=%.2f)", task.title, task.confidence)
+            from deadline_agent.events import TASK_CREATED, Event, event_bus
+
+            await event_bus.emit(Event(
+                type=TASK_CREATED,
+                payload={
+                    "task_id": task.id,
+                    "title": task.title,
+                    "source": item.source,
+                },
+            ))
+
+            # Log extraction I/O for LoRA training data
+            if extraction_prompt is not None:
+                try:
+                    from deadline_agent.models import ExtractionLog
+
+                    log_entry = ExtractionLog(
+                        input_text=extraction_prompt,
+                        output_json=result.model_dump_json(),
+                        model_used=extractor._ollama._model,
+                        confidence=result.confidence,
+                        task_id=task.id,
+                    )
+                    session.add(log_entry)
+                    session.commit()
+                except Exception:
+                    logger.warning("Failed to log extraction training data", exc_info=True)
+
             return True
         logger.debug("Duplicate skipped: %s", result.raw_hash)
         return False

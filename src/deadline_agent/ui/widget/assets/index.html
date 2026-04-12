@@ -35,18 +35,22 @@
         <span class="tab-icon">&#x1f4c5;</span>
         <span class="tab-label">Actions</span>
       </button>
-      <button class="tab" data-tab="digest" onclick="switchTab('digest')">
-        <span class="tab-icon">&#x2600;</span>
-        <span class="tab-label">Digest</span>
-      </button>
-      <button class="tab" data-tab="patterns" onclick="switchTab('patterns')">
-        <span class="tab-icon">&#x1f9e0;</span>
-        <span class="tab-label">Patterns</span>
-      </button>
-      <button class="tab" data-tab="recruiting" onclick="switchTab('recruiting')">
-        <span class="tab-icon">&#x1f4bc;</span>
-        <span class="tab-label">Pipeline</span>
-      </button>
+      <div class="tab-more-wrap">
+        <button class="tab" id="tab-more-btn" onclick="toggleMoreMenu()">
+          <span class="tab-icon">&#x22ef;</span>
+          <span class="tab-label">More</span>
+        </button>
+        <div class="tab-more-menu" id="tab-more-menu">
+          <button class="tab-more-item" data-tab="digest" onclick="switchTab('digest');closeMoreMenu()">&#x2600; Digest</button>
+          <button class="tab-more-item" data-tab="patterns" onclick="switchTab('patterns');closeMoreMenu()">&#x1f9e0; Patterns</button>
+          <button class="tab-more-item" data-tab="affects" onclick="switchTab('affects');closeMoreMenu()">&#x2764; Affects</button>
+          <button class="tab-more-item" data-tab="recruiting" onclick="switchTab('recruiting');closeMoreMenu()">&#x1f4bc; Pipeline</button>
+          <button class="tab-more-item" data-tab="goals" onclick="switchTab('goals');closeMoreMenu()">&#x1f3af; Goals</button>
+          <button class="tab-more-item" data-tab="decisions" onclick="switchTab('decisions');closeMoreMenu()">&#x2696; Decisions</button>
+          <button class="tab-more-item" data-tab="relationships" onclick="switchTab('relationships');closeMoreMenu()">&#x1f465; People</button>
+          <button class="tab-more-item" data-tab="me" onclick="switchTab('me');closeMoreMenu()">&#x1f9ec; Me</button>
+        </div>
+      </div>
     </div>
 
     <!-- Content panels -->
@@ -63,6 +67,7 @@
         <div id="chat-input-area">
           <input type="text" id="chat-input" placeholder="Ask about your deadlines..."
                  onkeydown="if(event.key==='Enter')sendChat()">
+          <button id="voice-btn" class="voice-btn" onclick="toggleVoice()" title="Voice input">&#x1f3a4;</button>
           <button id="chat-send" onclick="sendChat()">&#x27a4;</button>
         </div>
       </div>
@@ -91,10 +96,38 @@
         <div id="patterns-content"></div>
       </div>
 
+      <!-- Affects -->
+      <div id="panel-affects" class="panel">
+      </div>
+
       <!-- Recruiting Pipeline -->
       <div id="panel-recruiting" class="panel">
         <div id="recruiting-loading" class="loading">Loading pipeline...</div>
         <div id="recruiting-content"></div>
+      </div>
+
+      <!-- Goals -->
+      <div id="panel-goals" class="panel">
+        <div id="goals-loading" class="loading">Loading goals...</div>
+        <div id="goals-content"></div>
+      </div>
+
+      <!-- Decisions -->
+      <div id="panel-decisions" class="panel">
+        <div id="decisions-loading" class="loading">Loading decisions...</div>
+        <div id="decisions-content"></div>
+      </div>
+
+      <!-- Relationships -->
+      <div id="panel-relationships" class="panel">
+        <div id="relationships-loading" class="loading">Loading relationships...</div>
+        <div id="relationships-content"></div>
+      </div>
+
+      <!-- Me (Identity + Knowledge Graph) -->
+      <div id="panel-me" class="panel">
+        <div id="me-loading" class="loading">Loading...</div>
+        <div id="me-content"></div>
       </div>
     </div>
 

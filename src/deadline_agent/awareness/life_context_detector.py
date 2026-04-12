@@ -2,13 +2,20 @@
 
 import json
 import logging
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from deadline_agent.models import LifeContext, Task
+from deadline_agent.models import (
+    FileActivity,
+    LifeContext,
+    Task,
+)
 from deadline_agent.store.context_repository import LifeContextRepository
+
+USER_TZ = ZoneInfo("America/New_York")
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +181,113 @@ def _detect_light_week(session: Session, repo: LifeContextRepository) -> LifeCon
     return ctx
 
 
+def _detect_burnout(
+    session: Session, repo: LifeContextRepository
+) -> LifeContext | None:
+    """Detect burnout risk: 3+ late-night sessions (1-5 AM) in past 7 days."""
+    today = date.today()
+    seven_days_ago = datetime.now(UTC) - timedelta(days=7)
+
+    # Count file activity events during late-night hours (1-5 AM local)
+    stmt = (
+        select(FileActivity.modified_at)
+        .where(FileActivity.created_at >= seven_days_ago)
+    )
+    timestamps = list(session.scalars(stmt).all())
+
+    late_night_count = 0
+    late_night_dates: set[str] = set()
+    for ts in timestamps:
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        local = ts.astimezone(USER_TZ)
+        if 1 <= local.hour <= 4:
+            late_night_count += 1
+            late_night_dates.add(local.strftime("%Y-%m-%d"))
+
+    # Need late-night activity on 3+ distinct days
+    if len(late_night_dates) < 3:
+        return None
+
+    # Count zero-activity days in the past 7
+    stmt_daily = (
+        select(
+            func.date(FileActivity.created_at).label("day"),
+        )
+        .where(FileActivity.created_at >= seven_days_ago)
+        .group_by(func.date(FileActivity.created_at))
+    )
+    active_days = {str(row[0]) for row in session.execute(stmt_daily).all()}
+    zero_days = 7 - len(active_days)
+
+    start = today.isoformat()
+    end = (today + timedelta(days=7)).isoformat()
+
+    ctx = repo.create(
+        {
+            "season": "burnout",
+            "label": (
+                f"{len(late_night_dates)} late nights, "
+                f"{zero_days} zero-activity days this week"
+            ),
+            "start_date": start,
+            "end_date": end,
+            "source": "auto",
+            "active": True,
+            "metadata_json": json.dumps(
+                {
+                    "late_night_days": len(late_night_dates),
+                    "late_night_events": late_night_count,
+                    "zero_activity_days": zero_days,
+                }
+            ),
+        }
+    )
+    logger.info(
+        "Auto-detected burnout risk: %d late nights, %d zero days",
+        len(late_night_dates),
+        zero_days,
+    )
+    return ctx
+
+
+def _detect_crunch_week(
+    session: Session, repo: LifeContextRepository
+) -> LifeContext | None:
+    """Detect crunch week: 5+ pending tasks due in next 7 days."""
+    today = date.today()
+    week_end = (today + timedelta(days=7)).isoformat()
+
+    stmt = (
+        select(func.count(Task.id))
+        .where(Task.status == "pending")
+        .where(Task.due_date_iso.is_not(None))
+        .where(Task.due_date_iso >= today.isoformat())
+        .where(Task.due_date_iso <= week_end)
+    )
+    count = session.execute(stmt).scalar() or 0
+
+    if count < 5:
+        return None
+
+    start = today.isoformat()
+    end = week_end
+
+    ctx = repo.create(
+        {
+            "season": "crunch_week",
+            "label": f"{count} tasks due this week",
+            "start_date": start,
+            "end_date": end,
+            "source": "auto",
+            "active": True,
+            "metadata_json": json.dumps({"task_count": count}),
+        }
+    )
+    logger.info("Auto-detected crunch week: %d tasks due", count)
+    return ctx
+
+
 def detect_life_contexts(session: Session) -> list[LifeContext]:
     """Run all heuristics and create/update auto-detected LifeContext records.
 
@@ -194,6 +308,8 @@ def detect_life_contexts(session: Session) -> list[LifeContext]:
         ("exams", _detect_exams),
         ("recruiting", _detect_recruiting),
         ("light_week", _detect_light_week),
+        ("burnout", _detect_burnout),
+        ("crunch_week", _detect_crunch_week),
     ]:
         if repo.has_active_manual(season):
             logger.debug("Skipping %s auto-detection: manual override active", season)

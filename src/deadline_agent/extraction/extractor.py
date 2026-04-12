@@ -29,10 +29,10 @@ class OllamaExtractor:
 
     def __init__(
         self,
-        model: str = "llama3.2:3b",
+        model: str = "",
         base_url: str | None = None,
     ) -> None:
-        self._model = model
+        self._model = model or settings.lora_extraction_model or settings.extraction_model
         self._client = AsyncClient(host=base_url or settings.ollama_base_url)
 
     async def extract(self, item: IngestItem) -> ExtractedTask | None:

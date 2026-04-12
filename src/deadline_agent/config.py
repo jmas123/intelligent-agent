@@ -68,9 +68,23 @@ class Settings(BaseSettings):
     action_expiry_hours: int = 24
 
     # Reasoning
+    extraction_model: str = "llama3.2:3b"  # Ollama model for task extraction
     reasoning_interval_minutes: int = 120
     reasoning_model: str = ""  # empty = use same model as extraction
     reasoning_provider: str = "ollama"  # "ollama" or "anthropic"
+
+    # LoRA fine-tuning
+    lora_log_training_data: bool = False  # opt-in: log extraction/digest I/O for training
+    lora_extraction_model: str = ""  # fine-tuned extraction model tag, empty = use extraction_model
+    lora_reasoning_model: str = ""  # fine-tuned reasoning model tag, empty = use reasoning_model
+
+    # Identity model (Phase 17)
+    identity_synthesis_enabled: bool = True
+    identity_export_path: str = ""  # auto-export markdown to this path after each synthesis
+
+    # Social graph
+    enable_tone_analysis: bool = False
+    enable_social_graph: bool = False
 
     # Widget
     widget_width: int = 380
@@ -86,8 +100,22 @@ class Settings(BaseSettings):
     recruiting_patterns: list[str] = []  # filename patterns, e.g. ["JudeElMasri*.pdf"]
     project_directories: list[str] = []
 
+    # Phase 25: Recruiting intelligence
+    company_tier_map: dict[str, str] = {}  # manual company→tier: {"google": "big_tech"}
+    tier_inference_enabled: bool = True  # auto-classify unknown companies by heuristics
+    recruiting_analytics_enabled: bool = True
+
     # Life contexts (manual season definitions)
     life_contexts: list[dict[str, str]] = []
+
+    # Anticipatory triggers (Phase 13)
+    enable_anticipatory_triggers: bool = True
+    activity_drop_threshold_pct: float = 30.0
+    deadline_cluster_count: int = 3
+    deadline_cluster_days: int = 3
+    peak_nudge_minutes_before: int = 20
+    peak_nudge_check_interval_minutes: int = 10
+    recruiting_fast_path_notify: bool = True
 
     # File watcher
     watch_directories: list[str] = []
@@ -106,6 +134,18 @@ class Settings(BaseSettings):
     no_work_alert_hours: int = 72
     file_link_threshold: float = 0.5
     enable_file_watcher: bool = True
+
+    # Phase 16: Ambient presence
+    enable_proactive_interrupts: bool = True
+    enable_session_briefing: bool = True
+    session_idle_minutes: int = 30
+    enable_voice_input: bool = False
+    whisper_model: str = "base.en"
+
+    # Pre-meeting briefing
+    enable_meeting_briefing: bool = True
+    meeting_briefing_lead_minutes: int = 15
+    meeting_briefing_check_interval_minutes: int = 5
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

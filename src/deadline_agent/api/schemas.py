@@ -19,6 +19,7 @@ class TaskResponse(BaseModel):
     course: str | None
     urgency: str | None = None
     status: str
+    affect: str | None = None  # Phase 24: enjoyment | neutral | avoidance | anxiety
 
     model_config = {"from_attributes": True}
 
@@ -196,6 +197,73 @@ class SemesterRecordResponse(BaseModel):
     created_at: str
 
 
+class WeeklySnapshotResponse(BaseModel):
+    """Serialized weekly snapshot for API responses."""
+
+    id: int
+    week_start: str
+    week_end: str
+    tasks_completed: int
+    tasks_slipped: int
+    tasks_upcoming: int
+    total_work_minutes: int
+    narrative: str
+    semester_week_number: int | None
+    created_at: str
+
+    model_config = {"from_attributes": True}
+
+
+class RecoveryDailyBlock(BaseModel):
+    """A single scheduled work block in a recovery plan."""
+
+    day: str
+    time_window: str
+    action: str
+
+
+class RecoveryPlanResponse(BaseModel):
+    """Recovery plan for an at-risk task."""
+
+    task_title: str
+    status: str
+    days_behind: float
+    estimated_hours_remaining: float
+    daily_blocks: list[RecoveryDailyBlock]
+    tradeoff_note: str
+
+
+class RecoveryPlansResponse(BaseModel):
+    """Response containing recovery plans."""
+
+    plans: list[RecoveryPlanResponse]
+
+
+class RecoveryPlanRequest(BaseModel):
+    """Request body for on-demand recovery plans."""
+
+    task_ids: list[int] = []
+
+
+class AmbientNotificationResponse(BaseModel):
+    """A single ambient notification."""
+
+    title: str
+    body: str
+    category: str
+    priority: str
+    timestamp: str
+
+
+class CurrentModeResponse(BaseModel):
+    """Active mode with summary data."""
+
+    mode: str | None
+    label: str
+    summary: str
+    life_contexts: list[LifeContextResponse] = []
+
+
 class GmailSearchRequest(BaseModel):
     """Request body for Gmail search."""
 
@@ -233,6 +301,10 @@ class ApplicationResponse(BaseModel):
     last_signal_at: str
     signal_count: int
     signals: list[SignalEntry] = []
+    # Phase 25 fields
+    company_tier: str | None = None
+    role_type: str | None = None
+    resume_variant: str | None = None
 
 
 class UpcomingInterview(BaseModel):
@@ -250,6 +322,174 @@ class RecruitingPipelineResponse(BaseModel):
     applications: list[ApplicationResponse]
     upcoming_interviews: list[UpcomingInterview]
     summary: dict[str, int]
+
+
+# ── Phase 25: Recruiting analytics schemas ───────────────────────────
+
+
+class ResponseRateEntry(BaseModel):
+    """Response rate for a single dimension (tier, method, etc.)."""
+
+    key: str
+    total: int
+    responded: int
+    rate: float
+
+
+class FitScoreEntry(BaseModel):
+    """Fit score for an active application."""
+
+    company: str
+    score: float
+    rank: int
+    matching_factors: list[str] = []
+
+
+class RecruitingAnalyticsResponse(BaseModel):
+    """Full recruiting analytics payload."""
+
+    response_rates: list[ResponseRateEntry] = []
+    over_indexing_alerts: list[dict] = []
+    tier_gaps: list[dict] = []
+    resume_effectiveness: list[ResponseRateEntry] = []
+    temporal_patterns: list[dict] = []
+    fit_scores: list[FitScoreEntry] = []
+    pipeline_stats: dict = {}
+
+
+# ── Goal schemas ─────────────────────────────────────────────────────
+
+
+class GoalResponse(BaseModel):
+    """Serialized goal for API responses."""
+
+    id: int
+    description: str
+    category: str
+    target_metric: str | None
+    status: str
+    created_at: str
+    updated_at: str
+
+    model_config = {"from_attributes": True}
+
+
+class CreateGoalRequest(BaseModel):
+    """Request body for creating a goal."""
+
+    description: str
+    category: str  # academic | recruiting | health | social | personal
+    target_metric: str | None = None
+
+
+class GoalStatusUpdate(BaseModel):
+    """Request body for updating goal status."""
+
+    status: str  # achieved | abandoned
+
+
+# ── Decision schemas ─────────────────────────────────────────────────
+
+
+class DecisionResponse(BaseModel):
+    """Serialized decision for API responses."""
+
+    id: int
+    description: str
+    alternatives_considered: list[str]
+    chosen_option: str
+    context_json: dict
+    outcome: str | None
+    outcome_recorded_at: str | None
+    created_at: str
+
+    model_config = {"from_attributes": True}
+
+
+class CreateDecisionRequest(BaseModel):
+    """Request body for recording a decision."""
+
+    description: str
+    chosen_option: str
+    alternatives: list[str] | None = None
+    context: dict | None = None
+
+
+class RecordOutcomeRequest(BaseModel):
+    """Request body for recording a decision outcome."""
+
+    outcome: str
+
+
+# ── Relationship schemas ─────────────────────────────────────────────
+
+
+class RelationshipResponse(BaseModel):
+    """Serialized relationship for API responses."""
+
+    id: int
+    person: str
+    channel: str
+    interaction_count: int
+    last_interaction_at: str | None
+    avg_response_time_hours: float | None
+    trend: str
+    energy_signal: str | None
+
+    model_config = {"from_attributes": True}
+
+
+# ── Simulation schemas ──────────────────────────────────────────────
+
+
+class SimulateRequest(BaseModel):
+    """Request body for behavioral simulation."""
+
+    scenario: str
+
+
+class SimulationImpact(BaseModel):
+    """A single projected impact."""
+
+    domain: str
+    impact: str
+    severity: str
+
+
+class SimulateResponse(BaseModel):
+    """Behavioral simulation result."""
+
+    scenario: str
+    confidence: str
+    confidence_reason: str
+    projected_impacts: list[SimulationImpact]
+    weekly_projection: str
+    recommendation: str
+    data_density: dict[str, int]
+
+
+# ── Task affect schemas ─────────────────────────────────────
+
+
+class TaskAffectResponse(BaseModel):
+    """Inferred affect for a task type."""
+
+    task_type: str
+    affect_label: str  # enjoyment | neutral | avoidance | anxiety
+    confidence: float
+    evidence: dict[str, object]
+    intervention: str
+    energy_label: str | None = None  # energizing | neutral | draining
+
+
+class MeetingBriefingResponse(BaseModel):
+    """Pre-meeting briefing for an upcoming calendar event."""
+
+    summary: str
+    start: str
+    minutes_until: int
+    briefing: str
+    attendee_count: int
 
 
 def _format_due(due_str: str) -> str:

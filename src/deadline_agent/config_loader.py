@@ -23,6 +23,7 @@ SECTION_MAP: dict[str, dict[str, str]] = {
         "anthropic_model": "anthropic_model",
         "use_anthropic_fallback": "use_anthropic_fallback",
         "embedding_model": "embedding_model",
+        "extraction_model": "extraction_model",
     },
     "google": {
         "credentials_path": "google_credentials_path",
@@ -69,6 +70,19 @@ SECTION_MAP: dict[str, dict[str, str]] = {
         "session_gap_minutes": "session_gap_minutes",
         "analysis_interval_hours": "behavioral_analysis_interval_hours",
         "min_pattern_confidence": "min_pattern_confidence",
+    },
+    "lora": {
+        "log_training_data": "lora_log_training_data",
+        "extraction_model": "lora_extraction_model",
+        "reasoning_model": "lora_reasoning_model",
+    },
+    "identity": {
+        "synthesis_enabled": "identity_synthesis_enabled",
+        "export_path": "identity_export_path",
+    },
+    "social": {
+        "enable_tone_analysis": "enable_tone_analysis",
+        "enable_social_graph": "enable_social_graph",
     },
     "life_contexts": {
         "contexts": "life_contexts",
