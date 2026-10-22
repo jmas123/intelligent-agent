@@ -30,6 +30,12 @@ def _add_task(session: Session, hours_until_due: int = 4, **overrides: object) -
     return task
 
 
+def _mock_engine():
+    engine = AsyncMock()
+    engine.evaluate = AsyncMock()
+    return engine
+
+
 @pytest.mark.asyncio
 @patch("deadline_agent.reasoning.engine.generate_summary", new_callable=AsyncMock)
 async def test_digest_v2_uses_llm(mock_summary: AsyncMock, session: Session) -> None:
@@ -70,10 +76,11 @@ async def test_digest_v2_no_tasks(session: Session) -> None:
 
 @pytest.mark.asyncio
 @patch("deadline_agent.reasoning.engine.generate_summary", new_callable=AsyncMock)
-@patch("deadline_agent.notifications.digest.send_notification", return_value=True)
+@patch("deadline_agent.reasoning.intervention_engine.get_intervention_engine")
 async def test_send_digest_v2(
-    mock_notify: object, mock_summary: AsyncMock, session: Session
+    mock_get_engine: object, mock_summary: AsyncMock, session: Session
 ) -> None:
+    mock_get_engine.return_value = _mock_engine()
     _add_task(session, hours_until_due=4, raw_hash="t1")
     mock_summary.return_value = "Focus on HW3 today."
 

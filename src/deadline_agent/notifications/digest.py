@@ -8,7 +8,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from deadline_agent.models import Task
-from deadline_agent.notifications.macos import send_notification
 
 logger = logging.getLogger(__name__)
 
@@ -88,44 +87,59 @@ async def generate_digest_v2(session: Session) -> str | None:
     return generate_digest(session)
 
 
-def send_digest(session: Session) -> bool:
-    """Generate and send morning digest notification.
+async def send_digest(session: Session) -> bool:
+    """Generate and send morning digest via intervention engine.
 
-    Returns True if digest was sent, False if no tasks or sending failed.
+    Returns True if digest was sent, False if no tasks.
     """
+    from deadline_agent.reasoning.intervention_engine import get_intervention_engine
+
     text = generate_digest(session)
     if text is None:
         logger.info("No upcoming tasks for digest")
         return False
 
-    # Notification body is limited — use first few lines
     lines = text.split("\n")
     summary = lines[0]
-    body = "\n".join(lines[1:6])  # Up to 5 tasks
+    body = "\n".join(lines[1:6])
     if len(lines) > 6:
         body += f"\n  ...and {len(lines) - 6} more"
 
-    return send_notification(
+    engine = get_intervention_engine()
+    await engine.evaluate(
+        session,
+        task_id=None,
+        risk_level="low",
+        category="digest",
         title="Deadline Agent — Morning Digest",
-        body=body,
-        subtitle=summary,
+        body=f"{summary}\n{body}",
+        force=True,
     )
+    return True
 
 
 async def send_digest_v2(session: Session) -> bool:
-    """Generate LLM digest and send as notification. Falls back to v1."""
+    """Generate LLM digest and send via intervention engine. Falls back to v1."""
+    from deadline_agent.reasoning.intervention_engine import get_intervention_engine
+
     text = await generate_digest_v2(session)
     if text is None:
         logger.info("No upcoming tasks for digest")
         return False
 
-    # Truncate for notification
     lines = text.split("\n")
     body = "\n".join(lines[:6])
     if len(lines) > 6:
         body += "\n..."
 
-    return send_notification(
+    engine = get_intervention_engine()
+    await engine.evaluate(
+        session,
+        task_id=None,
+        risk_level="low",
+        category="digest",
         title="Deadline Agent — Morning Digest",
         body=body,
+        force=True,
     )
+    return True

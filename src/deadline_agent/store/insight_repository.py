@@ -1,13 +1,19 @@
 """Insight repository for CRUD operations."""
 
 import json
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from deadline_agent.config import settings
 from deadline_agent.models import Insight
+
+
+def _age_cutoff(max_age_hours: int) -> datetime:
+    """Naive-UTC cutoff matching how created_at is stored (SQL CURRENT_TIMESTAMP)."""
+    return datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=max_age_hours)
 
 
 class InsightRepository:
@@ -24,11 +30,19 @@ class InsightRepository:
         self._session.commit()
         return insight
 
-    def list_active(self, limit: int = 10) -> list[Insight]:
-        """Get active (non-dismissed) insights, most recent first."""
+    def list_active(self, limit: int = 10, max_age_hours: int | None = None) -> list[Insight]:
+        """Get active (non-dismissed, non-expired) insights, most recent first.
+
+        Insights are ephemeral observations: anything older than
+        ``insight_max_age_hours`` is never surfaced, even if cleanup
+        has not run (e.g. the reasoning cycle has been idle).
+        """
+        if max_age_hours is None:
+            max_age_hours = settings.insight_max_age_hours
         stmt = (
             select(Insight)
             .where(Insight.dismissed.is_(False))
+            .where(Insight.created_at >= _age_cutoff(max_age_hours))
             .order_by(Insight.created_at.desc())
             .limit(limit)
         )
@@ -46,18 +60,23 @@ class InsightRepository:
     def get_for_task(self, task_id: int) -> list[Insight]:
         """Get active insights related to a specific task."""
         stmt = (
-            select(Insight).where(Insight.dismissed.is_(False)).order_by(Insight.created_at.desc())
+            select(Insight)
+            .where(Insight.dismissed.is_(False))
+            .where(Insight.created_at >= _age_cutoff(settings.insight_max_age_hours))
+            .order_by(Insight.created_at.desc())
         )
         insights = list(self._session.scalars(stmt).all())
         return [i for i in insights if task_id in json.loads(i.related_task_ids)]
 
-    def clear_stale(self, max_age_hours: int = 24) -> int:
+    def clear_stale(self, max_age_hours: int | None = None) -> int:
         """Delete undismissed insights older than max_age_hours. Returns count deleted.
 
         Note: BehavioralPattern records are never deleted by this method.
         Patterns are persistent learned behaviors, not ephemeral insights.
         """
-        cutoff = datetime.now() - timedelta(hours=max_age_hours)
+        if max_age_hours is None:
+            max_age_hours = settings.insight_max_age_hours
+        cutoff = _age_cutoff(max_age_hours)
         stmt = (
             select(Insight).where(Insight.dismissed.is_(False)).where(Insight.created_at < cutoff)
         )

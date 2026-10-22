@@ -32,8 +32,18 @@ def _make_session_factory():
     return factory, session
 
 
+def _mock_engine():
+    engine = AsyncMock()
+    engine.evaluate = AsyncMock()
+    return engine
+
+
 @pytest.mark.asyncio
-async def test_interrupt_with_overdue_tasks():
+@patch("deadline_agent.reasoning.intervention_engine.get_intervention_engine")
+async def test_interrupt_with_overdue_tasks(mock_get_engine):
+    mock_engine = _mock_engine()
+    mock_get_engine.return_value = mock_engine
+
     factory, session = _make_session_factory()
 
     now = datetime.now(UTC)
@@ -51,42 +61,44 @@ async def test_interrupt_with_overdue_tasks():
 
     handler = ProactiveInterruptHandler(factory)
 
-    with patch("deadline_agent.awareness.proactive_interrupts.notification_router") as mock_router:
-        mock_router.send = AsyncMock(return_value=True)
+    event = Event(
+        type=SESSION_STARTED,
+        payload={"life_track": "school", "project_dir": "/tmp", "timestamp": now.isoformat()},
+    )
+    await handler._on_session_started(event)
 
-        event = Event(
-            type=SESSION_STARTED,
-            payload={"life_track": "school", "project_dir": "/tmp", "timestamp": now.isoformat()},
-        )
-        await handler._on_session_started(event)
-
-        mock_router.send.assert_called_once()
-        notification = mock_router.send.call_args[0][0]
-        assert "overdue" in notification.body.lower()
-        assert notification.priority.value == "low"
+    mock_engine.evaluate.assert_called_once()
+    call_kwargs = mock_engine.evaluate.call_args.kwargs
+    assert "overdue" in call_kwargs["body"].lower()
+    assert call_kwargs["category"] == "session"
 
 
 @pytest.mark.asyncio
-async def test_interrupt_no_pending_items():
+@patch("deadline_agent.reasoning.intervention_engine.get_intervention_engine")
+async def test_interrupt_no_pending_items(mock_get_engine):
+    mock_engine = _mock_engine()
+    mock_get_engine.return_value = mock_engine
+
     factory, session = _make_session_factory()
 
     handler = ProactiveInterruptHandler(factory)
 
-    with patch("deadline_agent.awareness.proactive_interrupts.notification_router") as mock_router:
-        mock_router.send = AsyncMock(return_value=True)
+    event = Event(
+        type=SESSION_STARTED,
+        payload={"life_track": "school"},
+    )
+    await handler._on_session_started(event)
 
-        event = Event(
-            type=SESSION_STARTED,
-            payload={"life_track": "school"},
-        )
-        await handler._on_session_started(event)
-
-        # No pending items → no notification
-        mock_router.send.assert_not_called()
+    # No pending items → no notification
+    mock_engine.evaluate.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_interrupt_includes_due_today():
+@patch("deadline_agent.reasoning.intervention_engine.get_intervention_engine")
+async def test_interrupt_includes_due_today(mock_get_engine):
+    mock_engine = _mock_engine()
+    mock_get_engine.return_value = mock_engine
+
     factory, session = _make_session_factory()
 
     now = datetime.now(UTC)
@@ -104,14 +116,11 @@ async def test_interrupt_includes_due_today():
 
     handler = ProactiveInterruptHandler(factory)
 
-    with patch("deadline_agent.awareness.proactive_interrupts.notification_router") as mock_router:
-        mock_router.send = AsyncMock(return_value=True)
+    event = Event(
+        type=SESSION_STARTED,
+        payload={"life_track": "school"},
+    )
+    await handler._on_session_started(event)
 
-        event = Event(
-            type=SESSION_STARTED,
-            payload={"life_track": "school"},
-        )
-        await handler._on_session_started(event)
-
-        mock_router.send.assert_called_once()
-        assert "due today" in mock_router.send.call_args[0][0].body.lower()
+    mock_engine.evaluate.assert_called_once()
+    assert "due today" in mock_engine.evaluate.call_args.kwargs["body"].lower()

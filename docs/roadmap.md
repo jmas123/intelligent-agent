@@ -247,7 +247,7 @@
 - [x] Widget: recruiting analytics section in Pipeline tab with response rate charts
 - [x] Chat: `deadline-agent ask "which companies should I follow up with"` uses pipeline analytics
 
-## Phase 26 — Tension model (single context → competing demands)
+## Phase 26 — Tension model (single context → competing demands) ⚡ FINISH THIS
 - [ ] `ActiveTension` representation: pairs of competing demands (recruiting vs academics, health vs deadlines) with current allocation ratio
 - [ ] Tension detection: when 2+ life contexts are active AND goal gaps show one winning, surface the tradeoff explicitly
 - [ ] Allocation tracking: infer time-split between competing demands from file activity life_track classification
@@ -257,3 +257,146 @@
 - [ ] Weekly tension summary in weekly review: how you actually split time vs how you said you would
 - [ ] Widget: tension indicators in dashboard mode banner — show competing demands, not just primary mode
 - [ ] CLI: `deadline-agent tensions` to show active tensions and allocation ratios
+
+---
+
+# The Brain Loop
+
+Everything above gives us features, models, and insights. What's below is the missing layer that makes it feel like a mind — a system that continuously decides what matters, when to speak, and how hard to push. These are the highest-leverage additions.
+
+## Phase 27 — Priority Engine (features → single ranked answer) ✅ COMPLETE
+The system generates insights but never answers the real question: "what should I do right now?"
+
+- [x] `PriorityRanking` model: task/action, rank, risk_if_ignored, suggested_next_action, reasoning
+- [x] Priority computation: combine deadline proximity, effort estimate, progress signals, life context, behavioral patterns, and risk scores into a single ranked list
+- [x] Top-3 output format: what, why, risk if ignored, suggested next action
+- [x] Example output: `1. Study for OS exam (risk: high, no activity, due in 2 days) 2. Reply to recruiter (relationship decay risk) 3. Finish NetApp module (on track)`
+- [x] Feed into morning digest: replace generic summary with ranked priorities
+- [x] Feed into menubar: top priority always visible
+- [x] Feed into session start briefing (Phase 32): priorities anchor the briefing
+- [x] Feed into voice response: "your top priority right now is..."
+- [x] CLI: `deadline-agent priorities` — ranked list with risk and reasoning
+- [x] API: `GET /api/priorities` — returns current ranked priorities
+- [x] Chat: priority-aware responses — every query implicitly knows what matters most
+
+## Phase 28 — Risk Prediction Engine (heuristics → probabilities) ✅ COMPLETE
+We already have lead time, effort accuracy, patterns, and file activity. Formalize it into per-task risk scores.
+
+- [x] `TaskRisk` model: task_id, probability_of_missing (0-1), hours_needed, hours_available, confidence_score, last_computed
+- [x] Risk computation: for every active task, compute P(miss) from lead time patterns, effort accuracy history, current progress, and available calendar gaps
+- [x] Hours-needed estimation: use `BehavioralPattern` effort accuracy to adjust raw estimates ("you underestimate essays by 1.8x")
+- [x] Hours-available computation: scan calendar for free blocks between now and deadline, discount by historical focus quality
+- [x] Confidence scoring: flag when data is sparse ("low confidence — first time seeing this task type")
+- [x] Output format: "You are 72% likely to miss this unless you act today"
+- [x] Risk feeds into Priority Engine (Phase 27): high-risk tasks rank higher
+- [x] Risk feeds into Intervention Engine (Phase 29): risk level determines interrupt strength
+- [x] Periodic recomputation: recalculate on state changes (new file activity, calendar change, deadline update)
+- [x] CLI: `deadline-agent risk` — per-task risk breakdown
+- [x] API: `GET /api/risk` — current risk scores for all active tasks
+- [x] Widget: risk indicators on task cards (green/yellow/red with probability)
+
+## Phase 29 — Intervention Engine (triggers → intelligent interrupts) ✅ COMPLETE
+The decision layer between risk signals and notification delivery. Every notification path routes through the intervention engine.
+
+- [x] `InterventionPolicy` config: max interrupts per day (interrupt budget), quiet hours, escalation thresholds
+- [x] Priority threshold model: map risk levels to intervention strength
+  - Low risk → silent (log only)
+  - Medium risk → menubar update (passive)
+  - High risk → macOS notification (active)
+  - Critical risk → voice interrupt (urgent)
+- [x] Interrupt budget tracker: count daily interrupts, refuse to fire low-value ones once budget is spent
+- [x] Escalation logic: if a medium-risk item is ignored for 24h and risk increases, escalate to next tier
+- [x] De-escalation: if user acts on something, cancel pending escalations for that item
+- [x] Cooldown periods: no back-to-back interrupts within configurable window (default 30 min)
+- [x] Context-aware suppression: don't interrupt during focus sessions, calendar events, or late-night hours
+- [x] Interrupt effectiveness tracking: did the user act after the interrupt? Learn which intervention types work
+- [x] Config: `[intervention]` section in config.toml — budget, thresholds, quiet hours, escalation rules
+- [x] All existing notification paths (triggers, alerts, nudges) route through this engine
+
+## Phase 30 — Passive Logging System (manual input �� ambient capture) ✅ COMPLETE
+Reconstructs your day passively from file activity, calendar, and work sessions. Only asks when it can't tell.
+
+### A. Daily auto-reconstruction
+- [x] End-of-day timeline inference: combine file activity + calendar events + work sessions → inferred timeline
+- [x] `DailyReconstruction` model: date, timeline_json (segments with confidence), user_confirmed, narrative
+- [x] Present reconstruction via intervention engine notification at end of day
+- [x] CLI: `deadline-agent day` — show today's inferred timeline with confidence indicators
+- [x] Scheduler: runs at configurable time (default 23:00), persists daily
+
+### B. Micro-confirmations
+- [x] Low-friction confirmation prompts: "Was this real progress on [task]?" routed through intervention engine
+- [x] Triggered for segments with confidence < threshold (default 0.6)
+- [x] Confirmation responses adjust FileTaskLink confidence (yes: +0.1, no: -0.2)
+- [x] Max 3 micro-confirmations per day, materiality check (only ask if deadline within 7d or active risk)
+
+### C. Voice logging
+- [x] Voice-to-task-update pipeline: record → Whisper transcribe → LLM tool-calling extraction → apply
+- [x] Supports: task_complete, task_progress, context_switch, note
+- [x] Fuzzy task title matching against pending tasks
+- [x] CLI: `deadline-agent voice` — record up to 15 seconds, transcribe, extract, apply
+- [ ] Always-listening mode (opt-in): deferred, needs continuous audio loop
+
+### D. Confidence scores
+- [x] All timeline segments carry confidence + confidence_sources
+- [x] Low-confidence inferences trigger micro-confirmations instead of assertions
+- [x] Confidence displayed in CLI: >= 0.8 solid, 0.6-0.8 "~", < 0.6 "?"
+- [x] Materiality check: only ask when answer changes a recommendation
+
+## Phase 31 — Simulation Engine v2 (projection → thinking partner) ✅ COMPLETE
+Wraps the Phase 23 LLM narrative with deterministic risk recomputation. Every projection is grounded in real P(miss) deltas.
+
+- [x] Natural language scenario input: LLM tool-calling parses "skip class" / "drop CS 301" into structured modifications
+- [x] Deterministic risk recomputation: recompute P(miss) for every task under modified calendar/task state
+- [x] Multi-variable projection: risk deltas + LLM narrative across academics, recruiting, health, schedule, social
+- [x] Projected schedule visualization: calendar gaps recomputed under scenario modifications
+- [x] Drop/add analysis: freed hours, net risk change, which tasks benefit from dropping
+- [x] Failure probability per task under scenario: exact P(miss) before → after with delta
+- [x] Feed Risk Prediction Engine (Phase 28) data into simulations for grounded projections
+- [x] Conversational simulation: session_id accumulates modifications across follow-up turns
+- [x] CLI: `deadline-agent simulate "<scenario>"` with `--follow-up` for chained what-ifs
+- [x] API: `POST /simulate/v2` with risk_deltas, projected_schedule, drop_analysis in response
+
+## Phase 32 — Session Start Intelligence (task list → thinking partner) ✅ COMPLETE
+Phase 16 added session framing. This makes it the primary interface — when you sit down, it tells you what to think about.
+
+- [x] 20-30 second structured briefing on session start, not a task dump
+- [x] Format:
+  ```
+  You have 3 hours free.
+
+  Most important:
+  - OS exam (high risk, no progress)
+  - Recruiter follow-up (stale 6 days)
+
+  Recommendation:
+  Start with 90 min OS prep now.
+  ```
+- [x] Pulls from: Priority Engine (Phase 27) for ranking, Risk Engine (Phase 28) for urgency, calendar for available time
+- [x] Available time computation: look at calendar from now until next event or end of day
+- [x] Time-block suggestion: break available time into recommended focus blocks based on priorities
+- [x] Delivery channels: menubar popup (intervention engine), CLI, chat greeting, compact variant for voice
+- [x] Session end summary: "you spent 2h on OS prep (good), skipped the recruiter follow-up (still stale)"
+- [x] CLI: `deadline-agent start` — trigger session briefing manually
+- [x] Auto-trigger: detect session start from first file activity after 30+ min gap (ambient state SESSION_STARTED)
+
+---
+
+# Current priorities (what to build next)
+
+**Done (brain loop core):**
+1. ~~Priority Engine (Phase 27)~~ ✅
+2. ~~Risk Prediction Engine (Phase 28)~~ ✅
+3. ~~Intervention Engine (Phase 29)~~ ✅
+4. ~~Passive Logging (Phase 30)~~ ✅
+
+**Build now (remaining brain loop):**
+5. Finish Tension Model (Phase 26) — not started, high value
+6. ~~Session Start Intelligence (Phase 32)~~ ✅
+7. ~~Simulation Engine v2 (Phase 31)~~ ✅
+
+**Defer:**
+- Phase 21 (browser extension / consumption tracking) — not yet needed
+- Phase 22 remaining items (QLoRA training) — need more data first
+- More ingestion sources — we have enough signal
+- More raw features or models — the bottleneck is reasoning, not data
+- Heavy automation — propose-only model is correct for now

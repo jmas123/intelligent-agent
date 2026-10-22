@@ -48,6 +48,8 @@
           <button class="tab-more-item" data-tab="goals" onclick="switchTab('goals');closeMoreMenu()">&#x1f3af; Goals</button>
           <button class="tab-more-item" data-tab="decisions" onclick="switchTab('decisions');closeMoreMenu()">&#x2696; Decisions</button>
           <button class="tab-more-item" data-tab="relationships" onclick="switchTab('relationships');closeMoreMenu()">&#x1f465; People</button>
+          <button class="tab-more-item" data-tab="day" onclick="switchTab('day');closeMoreMenu()">&#x1f4c6; Day</button>
+          <button class="tab-more-item" data-tab="brain" onclick="switchTab('brain');closeMoreMenu()">&#x26a1; Brain</button>
           <button class="tab-more-item" data-tab="me" onclick="switchTab('me');closeMoreMenu()">&#x1f9ec; Me</button>
         </div>
       </div>
@@ -122,6 +124,18 @@
       <div id="panel-relationships" class="panel">
         <div id="relationships-loading" class="loading">Loading relationships...</div>
         <div id="relationships-content"></div>
+      </div>
+
+      <!-- Day (Daily Reconstruction Timeline) -->
+      <div id="panel-day" class="panel">
+        <div id="day-loading" class="loading">Loading day timeline...</div>
+        <div id="day-content"></div>
+      </div>
+
+      <!-- Brain (Intervention Engine + Micro-confirmations + Briefing) -->
+      <div id="panel-brain" class="panel">
+        <div id="brain-loading" class="loading">Loading brain state...</div>
+        <div id="brain-content"></div>
       </div>
 
       <!-- Me (Identity + Knowledge Graph) -->

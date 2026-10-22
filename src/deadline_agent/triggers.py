@@ -18,7 +18,6 @@ from deadline_agent.events import (
     event_bus,
 )
 from deadline_agent.models import FileActivity, Task, WorkSession
-from deadline_agent.notifications.macos import send_notification
 
 logger = logging.getLogger(__name__)
 
@@ -165,11 +164,19 @@ class CompoundTriggerEngine:
         if not self._should_notify(key):
             return
 
-        send_notification(
-            title=f"Recruiting: {company}",
-            body=f"Status → {new_status}",
-            subtitle=subject[:80] if subject else "",
-        )
+        from deadline_agent.reasoning.intervention_engine import get_intervention_engine
+
+        engine = get_intervention_engine()
+        with self._session_factory() as session:
+            await engine.evaluate(
+                session,
+                task_id=None,
+                risk_level="high",
+                category="recruiting",
+                title=f"Recruiting: {company}",
+                body=f"Status → {new_status}" + (f" — {subject[:80]}" if subject else ""),
+            )
+            session.commit()
         logger.info(
             "Recruiting fast-path notification: %s → %s",
             company,
@@ -200,8 +207,17 @@ class CompoundTriggerEngine:
             count = session.execute(stmt).scalar() or 0
 
             if count >= settings.deadline_cluster_count:
+                from deadline_agent.reasoning.intervention_engine import (
+                    get_intervention_engine,
+                )
+
+                engine = get_intervention_engine()
                 if self.activity_baseline.is_dropped():
-                    send_notification(
+                    await engine.evaluate(
+                        session,
+                        task_id=None,
+                        risk_level="high",
+                        category="cluster",
                         title="Workload spike detected",
                         body=(
                             f"{count} deadlines in the next "
@@ -214,8 +230,11 @@ class CompoundTriggerEngine:
                         count,
                     )
                 elif count >= settings.deadline_cluster_count + 2:
-                    # Large cluster even without activity drop
-                    send_notification(
+                    await engine.evaluate(
+                        session,
+                        task_id=None,
+                        risk_level="high",
+                        category="cluster",
                         title="Heavy deadline week ahead",
                         body=f"{count} deadlines in the next "
                         f"{settings.deadline_cluster_days} days.",
@@ -252,7 +271,16 @@ class CompoundTriggerEngine:
                 session, semester_week, [], contexts
             )
             if predictions:
-                send_notification(
+                from deadline_agent.reasoning.intervention_engine import (
+                    get_intervention_engine,
+                )
+
+                engine = get_intervention_engine()
+                await engine.evaluate(
+                    session,
+                    task_id=None,
+                    risk_level="medium",
+                    category="historical_spike",
                     title="Historical pattern warning",
                     body=predictions[0][:300],
                 )
@@ -354,7 +382,16 @@ async def peak_window_nudge_scheduler(
                 nudged_today.add(nudge_key)
 
                 course = f" ({task.course})" if task.course else ""
-                send_notification(
+                from deadline_agent.reasoning.intervention_engine import (
+                    get_intervention_engine,
+                )
+
+                engine = get_intervention_engine()
+                await engine.evaluate(
+                    session,
+                    task_id=task.id,
+                    risk_level="medium",
+                    category="peak_nudge",
                     title="Peak window starting soon",
                     body=(
                         f"{task.title}{course} is due in <24h "
@@ -362,6 +399,7 @@ async def peak_window_nudge_scheduler(
                         f"starts in {minutes_until} min."
                     ),
                 )
+                session.commit()
                 logger.info(
                     "Peak window nudge: %s (due <24h, window in %dmin)",
                     task.title,
@@ -377,7 +415,11 @@ async def follow_up_staleness_scheduler(
 ) -> None:
     """Check for recruiting applications that need follow-up.
 
-    Runs daily and notifies about applications with no signal in 7+ days.
+    Notifies about applications gone quiet for 7+ days, but only while a
+    follow-up is still worth sending: applications stale beyond
+    ``follow_up_max_days`` are treated as dead and never surface again, and
+    each application is reminded at most once per
+    ``follow_up_reminder_interval_days``.
     """
     import asyncio
 
@@ -386,8 +428,6 @@ async def follow_up_staleness_scheduler(
     )
 
     logger.info("Follow-up staleness scheduler started")
-    notified_today: set[str] = set()
-    last_clear_date = ""
 
     while True:
         # Check every 6 hours
@@ -398,13 +438,13 @@ async def follow_up_staleness_scheduler(
             continue
 
         try:
-            today = datetime.now(UTC).strftime("%Y-%m-%d")
-            if today != last_clear_date:
-                notified_today.clear()
-                last_clear_date = today
-
             with session_factory() as session:
+                from deadline_agent.store.intervention_repository import (
+                    InterventionRepository,
+                )
+
                 repo = RecruitingRepository(session)
+                intervention_repo = InterventionRepository(session)
                 active_apps = repo.list_active()
                 now = datetime.now(UTC)
 
@@ -416,30 +456,50 @@ async def follow_up_staleness_scheduler(
                         signal_dt = signal_dt.replace(tzinfo=UTC)
                     days = (now - signal_dt).days
 
-                    # Notify at 7 and 14 day marks
                     if days < 7:
+                        continue
+                    # Past this point the lead is dead — stop nagging about it
+                    if days > settings.follow_up_max_days:
                         continue
                     if app.status in ("offer", "closed"):
                         continue
 
-                    key = f"{app.company_normalized}:{days // 7}"
-                    if key in notified_today:
+                    # One delivered reminder per application per interval
+                    # (survives restarts), and at most one attempt per day.
+                    body_prefix = f"{app.company_name}: no response"
+                    if intervention_repo.has_recent_record(
+                        "follow_up",
+                        body_prefix,
+                        settings.follow_up_reminder_interval_days,
+                        fired_only=True,
+                    ):
                         continue
-                    notified_today.add(key)
+                    if intervention_repo.has_recent_record("follow_up", body_prefix, 1):
+                        continue
 
-                    send_notification(
+                    from deadline_agent.reasoning.intervention_engine import (
+                        get_intervention_engine,
+                    )
+
+                    engine = get_intervention_engine()
+                    await engine.evaluate(
+                        session,
+                        task_id=None,
+                        risk_level="medium",
+                        category="follow_up",
                         title="Follow-up needed",
                         body=(
                             f"{app.company_name}: no response "
                             f"in {days} days (status: {app.status})"
                         ),
-                        subtitle="Consider sending a follow-up",
                     )
                     logger.info(
                         "Follow-up staleness alert: %s (%d days)",
                         app.company_name,
                         days,
                     )
+
+                session.commit()
 
         except Exception:
             logger.exception("Follow-up staleness check error")

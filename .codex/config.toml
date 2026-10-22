@@ -1,0 +1,33 @@
+[mcp_servers.fetch]
+command = "npx"
+args = [
+    "-y",
+    "@anthropic-ai/mcp-fetch",
+]
+
+[mcp_servers.filesystem]
+command = "npx"
+args = [
+    "-y",
+    "@anthropic-ai/mcp-filesystem",
+    "/Users/judeelmasr/intelligent-agent",
+    "/Users/judeelmasr/.deadline-agent",
+]
+
+[mcp_servers.memory]
+command = "npx"
+args = [
+    "-y",
+    "@anthropic-ai/mcp-memory",
+    "--memory-path",
+    "/Users/judeelmasr/.deadline-agent/memory.json",
+]
+
+[mcp_servers.sqlite]
+command = "npx"
+args = [
+    "-y",
+    "@anthropic-ai/mcp-sqlite",
+    "--db-path",
+    "/Users/judeelmasr/.deadline-agent/tasks.db",
+]

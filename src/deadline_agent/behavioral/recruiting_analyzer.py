@@ -165,6 +165,7 @@ async def _llm_classify_batch(companies: list[str]) -> dict[str, str]:
                 raw = await _call_anthropic(
                     "You classify companies into tiers. Return only valid JSON.",
                     prompt,
+                    model=settings.anthropic_light_model,
                 )
                 if raw:
                     import json as _json2

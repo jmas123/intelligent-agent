@@ -2,6 +2,7 @@
 
 import hashlib
 import logging
+from datetime import date, datetime, timezone
 
 import httpx
 from icalendar import Calendar
@@ -79,7 +80,18 @@ class MoodleIngester:
             uid = str(component.get("UID", ""))
 
             due_dt = dtend.dt if dtend else (dtstart.dt if dtstart else None)
-            due_iso = due_dt.isoformat() if due_dt else None
+            # Normalize date-only values (all-day events) to end-of-day UTC
+            # so SQL string comparisons against timezone-aware bounds work.
+            if due_dt is None:
+                due_iso = None
+            elif isinstance(due_dt, datetime):
+                if due_dt.tzinfo is None:
+                    due_dt = due_dt.replace(tzinfo=timezone.utc)
+                due_iso = due_dt.isoformat()
+            elif isinstance(due_dt, date):
+                due_iso = datetime(due_dt.year, due_dt.month, due_dt.day, 23, 59, 59, tzinfo=timezone.utc).isoformat()
+            else:
+                due_iso = str(due_dt)
 
             raw_hash = hashlib.sha256(uid.encode()).hexdigest()
 

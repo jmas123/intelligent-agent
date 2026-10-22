@@ -32,8 +32,18 @@ def _make_session_factory():
     return factory, session
 
 
+def _mock_engine():
+    engine = AsyncMock()
+    engine.evaluate = AsyncMock()
+    return engine
+
+
 @pytest.mark.asyncio
-async def test_briefing_with_overdue_and_due_today():
+@patch("deadline_agent.reasoning.intervention_engine.get_intervention_engine")
+async def test_briefing_with_overdue_and_due_today(mock_get_engine):
+    mock_engine = _mock_engine()
+    mock_get_engine.return_value = mock_engine
+
     factory, session = _make_session_factory()
 
     now = datetime.now(UTC)
@@ -55,23 +65,24 @@ async def test_briefing_with_overdue_and_due_today():
 
     gen = SessionBriefingGenerator(factory)
 
-    with patch("deadline_agent.awareness.session_briefing.notification_router") as mock_router:
-        mock_router.send = AsyncMock(return_value=True)
+    event = Event(
+        type=SESSION_STARTED,
+        payload={"life_track": "school", "timestamp": now.isoformat()},
+    )
+    await gen._on_session_started(event)
 
-        event = Event(
-            type=SESSION_STARTED,
-            payload={"life_track": "school", "timestamp": now.isoformat()},
-        )
-        await gen._on_session_started(event)
-
-        assert mock_router.send.call_count >= 1
-        first_notification = mock_router.send.call_args_list[0][0][0]
-        assert first_notification.priority.value == "low"
-        assert first_notification.category == "briefing"
+    mock_engine.evaluate.assert_called_once()
+    call_kwargs = mock_engine.evaluate.call_args.kwargs
+    assert call_kwargs["category"] == "briefing"
+    assert call_kwargs["title"] == "Session briefing"
 
 
 @pytest.mark.asyncio
-async def test_briefing_with_life_context():
+@patch("deadline_agent.reasoning.intervention_engine.get_intervention_engine")
+async def test_briefing_with_life_context(mock_get_engine):
+    mock_engine = _mock_engine()
+    mock_get_engine.return_value = mock_engine
+
     factory, session = _make_session_factory()
 
     now = datetime.now(UTC)
@@ -93,20 +104,21 @@ async def test_briefing_with_life_context():
 
     gen = SessionBriefingGenerator(factory)
 
-    with patch("deadline_agent.awareness.session_briefing.notification_router") as mock_router:
-        mock_router.send = AsyncMock(return_value=True)
+    event = Event(
+        type=SESSION_STARTED,
+        payload={"life_track": "school", "timestamp": now.isoformat()},
+    )
+    await gen._on_session_started(event)
 
-        event = Event(
-            type=SESSION_STARTED,
-            payload={"life_track": "school", "timestamp": now.isoformat()},
-        )
-        await gen._on_session_started(event)
-
-        assert mock_router.send.call_count >= 1
+    mock_engine.evaluate.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_briefing_dedup():
+@patch("deadline_agent.reasoning.intervention_engine.get_intervention_engine")
+async def test_briefing_dedup(mock_get_engine):
+    mock_engine = _mock_engine()
+    mock_get_engine.return_value = mock_engine
+
     factory, session = _make_session_factory()
 
     now = datetime.now(UTC)
@@ -120,38 +132,36 @@ async def test_briefing_dedup():
 
     gen = SessionBriefingGenerator(factory)
 
-    with patch("deadline_agent.awareness.session_briefing.notification_router") as mock_router:
-        mock_router.send = AsyncMock(return_value=True)
+    ts = now.isoformat()
+    event = Event(
+        type=SESSION_STARTED,
+        payload={"life_track": "school", "timestamp": ts},
+    )
+    # First call generates briefing
+    await gen._on_session_started(event)
+    first_count = mock_engine.evaluate.call_count
 
-        ts = now.isoformat()
-        event = Event(
-            type=SESSION_STARTED,
-            payload={"life_track": "school", "timestamp": ts},
-        )
-        # First call generates briefing
-        await gen._on_session_started(event)
-        first_count = mock_router.send.call_count
-
-        # Second call with same timestamp is deduped
-        await gen._on_session_started(event)
-        assert mock_router.send.call_count == first_count
+    # Second call with same timestamp is deduped
+    await gen._on_session_started(event)
+    assert mock_engine.evaluate.call_count == first_count
 
 
 @pytest.mark.asyncio
-async def test_briefing_empty_state():
+@patch("deadline_agent.reasoning.intervention_engine.get_intervention_engine")
+async def test_briefing_empty_state(mock_get_engine):
+    mock_engine = _mock_engine()
+    mock_get_engine.return_value = mock_engine
+
     factory, session = _make_session_factory()
 
     gen = SessionBriefingGenerator(factory)
 
-    with patch("deadline_agent.awareness.session_briefing.notification_router") as mock_router:
-        mock_router.send = AsyncMock(return_value=True)
+    now = datetime.now(UTC)
+    event = Event(
+        type=SESSION_STARTED,
+        payload={"life_track": "school", "timestamp": now.isoformat()},
+    )
+    await gen._on_session_started(event)
 
-        now = datetime.now(UTC)
-        event = Event(
-            type=SESSION_STARTED,
-            payload={"life_track": "school", "timestamp": now.isoformat()},
-        )
-        await gen._on_session_started(event)
-
-        # No tasks → no briefing
-        mock_router.send.assert_not_called()
+    # No tasks → no briefing
+    mock_engine.evaluate.assert_not_called()

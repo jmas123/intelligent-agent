@@ -41,7 +41,7 @@ class TaskRepository:
         limit: int = 50,
     ) -> list[Task]:
         """Query tasks with optional filters, ordered by due_date_iso ASC."""
-        stmt = select(Task).order_by(Task.due_date_iso.asc())
+        stmt = select(Task).order_by(Task.due_date_iso.asc().nulls_last())
         if status is not None:
             stmt = stmt.where(Task.status == status)
         if source is not None:
@@ -59,6 +59,14 @@ class TaskRepository:
         if task is None:
             return None
         task.status = status
+
+        # A task that is no longer pending must stop generating interventions
+        if status != "pending":
+            from deadline_agent.store.intervention_repository import InterventionRepository
+
+            InterventionRepository(self._session).cancel_escalations_for_task(
+                task_id, f"task_{status}"
+            )
 
         # Mark linked extraction logs as rejected for LoRA training data quality
         if status == "dismissed":
@@ -84,7 +92,7 @@ class TaskRepository:
             .where(Task.status == "pending")
             .where(Task.due_date_iso >= start)
             .where(Task.due_date_iso < end)
-            .order_by(Task.due_date_iso.asc())
+            .order_by(Task.due_date_iso.asc().nulls_last())
         )
         return list(self._session.scalars(stmt).all())
 
@@ -96,7 +104,7 @@ class TaskRepository:
             .where(Task.status == "pending")
             .where(Task.due_date_iso < now_iso)
             .where(Task.due_date_iso.is_not(None))
-            .order_by(Task.due_date_iso.asc())
+            .order_by(Task.due_date_iso.asc().nulls_last())
         )
         return list(self._session.scalars(stmt).all())
 

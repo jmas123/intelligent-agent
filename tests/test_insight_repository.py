@@ -1,7 +1,7 @@
 """Tests for the insight repository."""
 
 import json
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.orm import Session
 
@@ -93,3 +93,15 @@ def test_clear_stale(session: Session) -> None:
     active = repo.list_active()
     assert len(active) == 1
     assert active[0].id == fresh.id
+
+
+def test_list_active_excludes_expired(session: Session) -> None:
+    """Insights past their max age are never surfaced, even if cleanup hasn't run."""
+    repo = InsightRepository(session)
+    old = repo.create(SAMPLE_INSIGHT.copy())
+    old.created_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=30)
+    session.commit()
+
+    assert repo.list_active() == []
+    assert repo.get_for_task(1) == []
+    assert repo.list_active(max_age_hours=24 * 40)[0].id == old.id

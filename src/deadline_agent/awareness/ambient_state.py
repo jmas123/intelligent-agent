@@ -33,15 +33,25 @@ class AmbientState:
 
     def record_activity(
         self, life_track: str | None, timestamp: datetime
-    ) -> tuple[bool, str | None]:
+    ) -> tuple[bool, str | None, datetime | None]:
         """Record file activity and detect state transitions.
 
         Returns:
-            (session_just_started, previous_mode_if_switched)
+            (session_just_started, previous_mode_if_switched, ended_session_started_at)
             - session_just_started: True if this is the first activity after idle
             - previous_mode_if_switched: the old mode if a context switch occurred
+            - ended_session_started_at: if a prior session ended (idle gap),
+              the timestamp it began at — caller emits SESSION_ENDED.
         """
         was_idle = self.is_idle()
+        previous_session_start: datetime | None = None
+        if was_idle and self.session_active:
+            # The user came back after the idle threshold — the prior session
+            # implicitly ended. Capture its start time so callers can summarize.
+            previous_session_start = self.session_started_at
+            self.session_active = False
+            self.session_started_at = None
+
         self.last_activity_at = timestamp
 
         session_just_started = False
@@ -67,7 +77,7 @@ class AmbientState:
         self.last_life_track = self.current_mode
         self.current_mode = effective_track
 
-        return session_just_started, previous_mode
+        return session_just_started, previous_mode, previous_session_start
 
     def reset_session(self) -> None:
         """Mark the session as ended (called when idle detected)."""

@@ -179,11 +179,22 @@ something that genuinely knows you. Back it up.
 
 ## Current Phase
 
-See `@docs/roadmap.md` — currently Phase 21-22 (consumption tracking + LoRA fine-tuning).
+See `@docs/roadmap.md` — finishing the Brain Loop (Phase 26 remaining).
 
-### Next priorities
-1. Browser extension for Phase 21 consumption tracking
-2. QLoRA training pipeline (unsloth/axolotl) for extraction + reasoning LoRAs
-3. Job application tracker (auto-built from Gmail pipeline)
-4. Pre-meeting briefings (calendar event → context brief)
-5. What-if simulation ("what does my week look like if I take this interview?")
+Phases 1-20, 24-25, and 27-32 are complete. Phases 21-23 and 26 are partially complete / deferred.
+
+### Completed brain loop phases
+- ~~Priority Engine (Phase 27)~~ ✅
+- ~~Risk Prediction Engine (Phase 28)~~ ✅
+- ~~Intervention Engine (Phase 29)~~ ✅
+- ~~Passive Logging System (Phase 30)~~ ✅
+- ~~Simulation Engine v2 (Phase 31)~~ ✅
+- ~~Session Start Intelligence (Phase 32)~~ ✅
+
+### Next priorities (remaining brain loop)
+1. Finish Tension Model (Phase 26) — competing demands with allocation tracking
+
+### Deferred
+- Phase 21 (consumption tracking) — needs browser extension, not yet needed
+- Phase 22 remaining (QLoRA) — need more data before training
+- More ingestion sources, raw features, or heavy automation

@@ -53,6 +53,30 @@ class WidgetBridge:
             logger.error("Failed to fetch tasks: %s", e)
             return []
 
+    def create_task(
+        self,
+        title: str,
+        due_date: str = "",
+        task_type: str = "personal",
+        course: str = "",
+        urgency: int = 3,
+    ) -> dict:  # type: ignore[type-arg]
+        """Manually create a task."""
+        logger.info("create_task called: title=%r due=%r type=%r course=%r", title, due_date, task_type, course)
+        body: dict[str, object] = {"title": title, "type": task_type, "urgency": urgency}
+        if due_date:
+            body["due_date"] = due_date
+        if course:
+            body["course"] = course
+        logger.info("create_task body: %s", body)
+        try:
+            resp = self._client.post("/tasks", json=body)
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError as e:
+            logger.error("Failed to create task: %s", e)
+            return {"error": str(e)}
+
     def update_task_status(self, task_id: int, status: str) -> dict:  # type: ignore[type-arg]
         """Mark a task as done, dismissed, or pending."""
         try:
@@ -506,6 +530,28 @@ class WidgetBridge:
             logger.error("Failed to deactivate context %d: %s", context_id, e)
             return {"error": str(e)}
 
+    # Phase 27-28: Priorities and Risk
+
+    def get_priorities(self, limit: int = 5) -> dict:  # type: ignore[type-arg]
+        """Fetch current priority rankings."""
+        try:
+            resp = self._client.get("/priorities", params={"limit": limit})
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError as e:
+            logger.error("Failed to fetch priorities: %s", e)
+            return {"priorities": []}
+
+    def get_risk(self) -> dict:  # type: ignore[type-arg]
+        """Fetch current risk assessments."""
+        try:
+            resp = self._client.get("/risk")
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError as e:
+            logger.error("Failed to fetch risk: %s", e)
+            return {"risks": []}
+
     # Phase 16: Ambient presence
 
     def get_ambient_notifications(self) -> list:  # type: ignore[type-arg]
@@ -570,4 +616,106 @@ class WidgetBridge:
             return {"error": "Voice input requires openai-whisper. Install with: pip install openai-whisper"}
         except Exception as e:
             logger.error("Voice input failed: %s", e)
+            return {"error": str(e)}
+
+    # ── Brain tab (Intervention, Micro-confirmations, Briefing) ──────
+
+    def get_interventions(self, limit: int = 30) -> list:  # type: ignore[type-arg]
+        """Fetch recent intervention records."""
+        try:
+            resp = self._client.get("/interventions", params={"limit": limit})
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError as e:
+            logger.error("Failed to fetch interventions: %s", e)
+            return {"error": str(e)}
+
+    def get_intervention_stats(self) -> dict:  # type: ignore[type-arg]
+        """Fetch intervention budget, effectiveness, and escalation count."""
+        try:
+            resp = self._client.get("/intervention-stats")
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError as e:
+            logger.error("Failed to fetch intervention stats: %s", e)
+            return {"error": str(e)}
+
+    def get_intervention_escalations(self) -> list:  # type: ignore[type-arg]
+        """Fetch pending escalations."""
+        try:
+            resp = self._client.get("/intervention-escalations")
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError as e:
+            logger.error("Failed to fetch escalations: %s", e)
+            return {"error": str(e)}
+
+    def get_micro_confirmations(self, date: str = "") -> list:  # type: ignore[type-arg]
+        """Fetch pending micro-confirmations for a date (default today)."""
+        try:
+            params = {}
+            if date:
+                params["date"] = date
+            resp = self._client.get("/micro-confirmations", params=params)
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError as e:
+            logger.error("Failed to fetch micro-confirmations: %s", e)
+            return {"error": str(e)}
+
+    def respond_micro_confirmation(self, date: str, segment_index: int, confirmed: bool) -> dict:  # type: ignore[type-arg]
+        """Respond to a micro-confirmation."""
+        try:
+            resp = self._client.post(
+                "/micro-confirmations/respond",
+                json={"date": date, "segment_index": segment_index, "confirmed": confirmed},
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError as e:
+            logger.error("Failed to respond to micro-confirmation: %s", e)
+            return {"error": str(e)}
+
+    def get_session_briefing(self) -> dict:  # type: ignore[type-arg]
+        """Fetch an on-demand session briefing."""
+        try:
+            resp = self._client.get("/session-briefing")
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError as e:
+            logger.error("Failed to fetch session briefing: %s", e)
+            return {"error": str(e)}
+
+    # ── Day tab (Daily Reconstruction) ──────────────────────────────
+
+    def get_daily_reconstruction(self, date: str = "") -> dict:  # type: ignore[type-arg]
+        """Fetch the daily reconstructed timeline."""
+        try:
+            params = {}
+            if date:
+                params["date"] = date
+            resp = self._client.get("/daily-reconstruction", params=params, timeout=60.0)
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError as e:
+            logger.error("Failed to fetch daily reconstruction: %s", e)
+            return {"error": str(e)}
+
+    # ── Enhanced Simulation (v2 with risk deltas) ──────────────────
+
+    def run_simulation_v2(self, scenario: str, session_id: str = "") -> dict:  # type: ignore[type-arg]
+        """Run an enhanced what-if simulation with grounded risk deltas."""
+        try:
+            body: dict[str, str] = {"scenario": scenario}
+            if session_id:
+                body["session_id"] = session_id
+            resp = self._client.post(
+                "/simulate/v2",
+                json=body,
+                timeout=120.0,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError as e:
+            logger.error("Failed to run simulation v2: %s", e)
             return {"error": str(e)}

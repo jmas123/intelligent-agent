@@ -66,8 +66,9 @@ class OllamaExtractor:
         task.source = item.source
         task.raw_hash = item.metadata.get("raw_hash", task.raw_hash)
 
-        # Fall back to metadata due date if model missed it
-        if task.due_date_iso is None and item.metadata.get("due_date_iso"):
+        # Always prefer the machine-readable due date from the source (calendar
+        # event, iCal feed) over the LLM's guess — models often hallucinate dates.
+        if item.metadata.get("due_date_iso"):
             task.due_date_iso = item.metadata["due_date_iso"]
 
         # Fall back to metadata course if model missed it

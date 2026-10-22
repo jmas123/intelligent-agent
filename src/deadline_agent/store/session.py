@@ -44,11 +44,24 @@ def _migrate_file_activity_table() -> None:
         logger.info("Migrated file_activity table: added life_track column")
 
 
+def _migrate_intervention_records_table() -> None:
+    """Add response_value column for micro-confirmation responses."""
+    inspector = inspect(engine)
+    if "intervention_records" not in inspector.get_table_names():
+        return
+    columns = {col["name"] for col in inspector.get_columns("intervention_records")}
+    if "response_value" not in columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE intervention_records ADD COLUMN response_value TEXT"))
+        logger.info("Migrated intervention_records table: added response_value column")
+
+
 def init_db() -> None:
     """Create all tables if they don't exist, then run migrations."""
     Base.metadata.create_all(engine)
     _migrate_tasks_table()
     _migrate_file_activity_table()
+    _migrate_intervention_records_table()
 
     # Seed life contexts from config.toml
     try:

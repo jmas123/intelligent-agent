@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import logging
+from datetime import date, datetime
 from typing import Any
 
 import httpx
@@ -13,6 +14,22 @@ from deadline_agent.ingestion.base import BaseIngester
 from deadline_agent.pipeline import IngestItem, pipeline_queue
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_date(value: str | None) -> str | None:
+    """Convert a date-only string (YYYY-MM-DD) to an end-of-day UTC ISO datetime.
+
+    All-day events from Google Calendar use plain date strings. These must be
+    stored as full ISO 8601 datetimes so that SQL string comparisons against
+    timezone-aware query bounds produce correct results.
+    """
+    if value is None:
+        return None
+    try:
+        d = date.fromisoformat(value)
+        return datetime(d.year, d.month, d.day, 23, 59, 59).isoformat() + "+00:00"
+    except (ValueError, TypeError):
+        return value
 
 
 class GCalIngester(BaseIngester):
@@ -49,9 +66,11 @@ class GCalIngester(BaseIngester):
             end = event.get("end", {})
             organizer = event.get("organizer", {})
 
-            # Use dateTime if available, fall back to date (all-day events)
-            start_iso = start.get("dateTime") or start.get("date")
-            end_iso = end.get("dateTime") or end.get("date")
+            # Use dateTime if available, fall back to date (all-day events).
+            # Normalize date-only strings to full ISO datetimes so SQL
+            # string comparisons against timezone-aware bounds work correctly.
+            start_iso = start.get("dateTime") or _normalize_date(start.get("date"))
+            end_iso = end.get("dateTime") or _normalize_date(end.get("date"))
 
             item = IngestItem(
                 source="gcal",

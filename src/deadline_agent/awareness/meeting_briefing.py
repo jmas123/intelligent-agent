@@ -8,11 +8,6 @@ from zoneinfo import ZoneInfo
 
 from deadline_agent.config import settings
 from deadline_agent.events import MEETING_UPCOMING, Event, EventBus
-from deadline_agent.notifications.channels import (
-    Notification,
-    NotificationPriority,
-    notification_router,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -62,15 +57,20 @@ class MeetingBriefingGenerator:
                     cal_event, attendee_context, minutes_until, session
                 )
                 if briefing:
-                    await notification_router.send(
-                        Notification(
-                            title=f"Meeting in {int(minutes_until)} min: {cal_event.get('summary', '')}",
-                            body=briefing,
-                            priority=NotificationPriority.HIGH,
-                            category="briefing",
-                            ttl_seconds=int(minutes_until * 60),
-                        )
+                    from deadline_agent.reasoning.intervention_engine import (
+                        get_intervention_engine,
                     )
+
+                    engine = get_intervention_engine()
+                    await engine.evaluate(
+                        session,
+                        task_id=None,
+                        risk_level="high",
+                        category="briefing",
+                        title=f"Meeting in {int(minutes_until)} min: {cal_event.get('summary', '')}",
+                        body=briefing,
+                    )
+                    session.commit()
                     logger.info(
                         "Meeting briefing sent for: %s", cal_event.get("summary")
                     )

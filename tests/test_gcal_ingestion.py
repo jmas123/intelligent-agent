@@ -100,4 +100,4 @@ class TestHandleWebhook:
             await ingester.handle_webhook(_pubsub_payload())
 
             item = pipeline_queue.get_nowait()
-            assert item.metadata["due_date_iso"] == "2026-04-01"
+            assert item.metadata["due_date_iso"] == "2026-04-01T23:59:59+00:00"

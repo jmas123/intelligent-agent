@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     anthropic_api_key: str | None = None
     anthropic_model: str = "claude-sonnet-4-6"
+    anthropic_light_model: str = "claude-haiku-4-5-20251001"  # cheaper model for digest, weekly review, recruiting
     anthropic_extraction_model: str = "claude-haiku-4-5-20251001"
     use_anthropic_fallback: bool = True
     database_url: str = f"sqlite:///{Path.home() / '.deadline-agent' / 'tasks.db'}"
@@ -72,6 +73,7 @@ class Settings(BaseSettings):
     reasoning_interval_minutes: int = 120
     reasoning_model: str = ""  # empty = use same model as extraction
     reasoning_provider: str = "ollama"  # "ollama" or "anthropic"
+    insight_max_age_hours: int = 24  # insights older than this are never surfaced
 
     # LoRA fine-tuning
     lora_log_training_data: bool = False  # opt-in: log extraction/digest I/O for training
@@ -116,6 +118,8 @@ class Settings(BaseSettings):
     peak_nudge_minutes_before: int = 20
     peak_nudge_check_interval_minutes: int = 10
     recruiting_fast_path_notify: bool = True
+    follow_up_max_days: int = 30  # stop nagging about applications stale beyond this
+    follow_up_reminder_interval_days: int = 7  # min gap between reminders for one application
 
     # File watcher
     watch_directories: list[str] = []
@@ -141,6 +145,24 @@ class Settings(BaseSettings):
     session_idle_minutes: int = 30
     enable_voice_input: bool = False
     whisper_model: str = "base.en"
+
+    # Phase 29: Intervention engine
+    intervention_max_interrupts_per_day: int = 12
+    intervention_cooldown_minutes: int = 30
+    intervention_quiet_hours_start: str = "22:00"
+    intervention_quiet_hours_end: str = "07:00"
+    intervention_escalation_wait_hours: int = 24
+    intervention_max_escalations: int = 2  # cap escalation chain depth per intervention
+    intervention_stale_deadline_days: int = 7  # stop escalating deadlines older than this
+    intervention_effectiveness_window_minutes: int = 120
+    intervention_enable_voice: bool = False
+
+    # Phase 30: Passive logging
+    enable_daily_reconstruction: bool = True
+    daily_reconstruction_time: str = "23:00"
+    micro_confirmation_threshold: float = 0.6
+    max_micro_confirmations_per_day: int = 3
+    enable_voice_logging: bool = False
 
     # Pre-meeting briefing
     enable_meeting_briefing: bool = True

@@ -99,6 +99,48 @@ def mark(task_id: int, new_status: str) -> None:
     click.echo(f"Task {task_id} marked as {new_status}.")
 
 
+@cli.command("add")
+@click.argument("title")
+@click.option("--due", default=None, help="Due date (ISO 8601, e.g. 2026-05-01 or 2026-05-01T23:59)")
+@click.option("--type", "task_type", default="personal",
+              type=click.Choice(["assignment", "exam", "meeting", "personal", "project", "interview_prep"]),
+              show_default=True)
+@click.option("--course", default=None, help="Course or project name")
+@click.option("--urgency", default=3, type=click.IntRange(1, 5), show_default=True, help="1-5")
+def add_task(title: str, due: str | None, task_type: str, course: str | None, urgency: int) -> None:
+    """Manually create a task."""
+    import hashlib
+
+    raw_hash = hashlib.sha256(
+        f"manual:{title}:{due or ''}:{task_type}:{datetime.now().isoformat()}".encode()
+    ).hexdigest()
+
+    # Normalize date-only to end-of-day timestamp
+    due_iso = due
+    if due_iso and "T" not in due_iso:
+        due_iso = f"{due_iso}T23:59:00+00:00"
+
+    with SessionLocal() as session:
+        repo = TaskRepository(session)
+        task = repo.create_task(
+            {
+                "title": title,
+                "due_date_iso": due_iso,
+                "source": "manual",
+                "type": task_type,
+                "course": course,
+                "urgency_score": urgency,
+                "confidence": 1.0,
+                "raw_hash": raw_hash,
+            }
+        )
+    if task is None:
+        click.echo("Task already exists (duplicate).")
+        return
+    click.echo(f"Created task [{task.id}] {task.title} ({task_type})" +
+               (f" — due {_format_due(due)}" if due else ""))
+
+
 @cli.command("fetch-moodle")
 @click.argument("urls", nargs=-1, required=True)
 def fetch_moodle(urls: tuple[str, ...]) -> None:
@@ -138,9 +180,18 @@ def alerts() -> None:
 def alerts_check() -> None:
     """Run a pre-deadline alert check now."""
     from deadline_agent.notifications.alerts import check_and_send_alerts
+    from deadline_agent.reasoning.intervention_engine import init_intervention_engine
+
+    # Ensure intervention engine is initialized for CLI context
+    try:
+        from deadline_agent.reasoning.intervention_engine import get_intervention_engine
+
+        get_intervention_engine()
+    except RuntimeError:
+        init_intervention_engine(SessionLocal)
 
     with SessionLocal() as session:
-        count = check_and_send_alerts(session)
+        count = asyncio.run(check_and_send_alerts(session))
     click.echo(f"Sent {count} alert(s).")
 
 
@@ -546,6 +597,112 @@ def context_detect() -> None:
                 click.echo(f"  [{ctx.id}] {ctx.season.upper()}{label}: {ctx.start_date} to {ctx.end_date}")
 
 
+@cli.command("risk")
+@click.option("--recompute", is_flag=True, help="Force recompute before displaying")
+def risk_command(recompute: bool) -> None:
+    """Show per-task risk of missing deadlines."""
+    from deadline_agent.reasoning.risk_engine import compute_task_risks, get_current_risks
+
+    if recompute:
+        click.echo("Recomputing risk assessments...")
+
+        async def _recompute() -> None:
+            with SessionLocal() as session:
+                await compute_task_risks(session)
+
+        asyncio.run(_recompute())
+
+    with SessionLocal() as session:
+        items = get_current_risks(session)
+
+    if not items:
+        click.echo("No risk assessments computed yet.")
+        click.echo("Run with --recompute to generate assessments, or wait for the next reasoning cycle.")
+        return
+
+    LEVEL_ICON = {"critical": "!!!", "high": "!! ", "medium": "!  ", "low": "   "}
+
+    click.echo()
+    for item in items:
+        icon = LEVEL_ICON.get(item["risk_level"], "   ")
+        pct = item["probability_pct"]
+        title = item["title"]
+        course = f" ({item['course']})" if item.get("course") else ""
+        time_label = item["time_label"]
+
+        click.echo(f"  {icon} {pct}%  {title}{course}")
+        click.echo(f"         {time_label} | {item['hours_needed']:.1f}h needed | {item['hours_available']:.1f}h available | {item['hours_worked']:.1f}h worked")
+        click.echo(f"         {item['summary']}")
+        if item["confidence"] < 0.5:
+            click.echo(f"         ⚠ {item['confidence_reason']}")
+        click.echo()
+
+
+@cli.command("priorities")
+@click.option("--recompute", is_flag=True, help="Force recompute before displaying")
+@click.option("--limit", default=5, show_default=True, help="Number of priorities to show")
+def priorities_command(recompute: bool, limit: int) -> None:
+    """Show ranked priorities — what you should do right now."""
+    from deadline_agent.reasoning.priority_engine import (
+        compute_priorities,
+        get_current_priorities,
+    )
+
+    if recompute:
+        click.echo("Recomputing priorities...")
+
+        async def _recompute() -> None:
+            with SessionLocal() as session:
+                await compute_priorities(session)
+
+        asyncio.run(_recompute())
+
+    with SessionLocal() as session:
+        items = get_current_priorities(session, limit=limit)
+
+    if not items:
+        click.echo("No priorities computed yet.")
+        click.echo("Run with --recompute to generate priorities, or wait for the next reasoning cycle.")
+        return
+
+    click.echo()
+    for item in items:
+        rank = item["rank"]
+        title = item["title"]
+        course = f" ({item['course']})" if item.get("course") else ""
+        time_label = item["time_label"]
+        score = item["score"]
+
+        # Header line
+        click.echo(f"  #{rank}  {title}{course}")
+        click.echo(f"      {time_label} | score: {score:.2f}")
+        click.echo(f"      Risk: {item['risk_if_ignored']}")
+        click.echo(f"      Action: {item['suggested_action']}")
+        click.echo(f"      Why: {item['reasoning']}")
+        click.echo()
+
+
+@cli.command("start")
+@click.option("--life-track", default=None, help="Optional life_track hint (school|recruiting|project)")
+@click.option("--compact", is_flag=True, help="One-line briefing (menubar/voice style)")
+def start_command(life_track: str | None, compact: bool) -> None:
+    """Trigger a session-start briefing — Phase 32."""
+    from deadline_agent.awareness.session_intelligence import (
+        build_session_briefing,
+        format_session_briefing,
+    )
+
+    async def _build():
+        with SessionLocal() as session:
+            return await build_session_briefing(session, life_track=life_track)
+
+    briefing = asyncio.run(_build())
+    if not briefing.priorities and not briefing.extras:
+        click.echo("Nothing pressing right now — clear runway.")
+        return
+    click.echo(format_session_briefing(briefing, compact=compact))
+
+
 @cli.command("patterns")
 def patterns_command() -> None:
     """Show learned behavioral patterns."""
@@ -739,7 +896,12 @@ def auth() -> None:
 
 @auth.command("google")
 def auth_google() -> None:
-    """Set up Google OAuth2 credentials (Gmail + Calendar)."""
+    """Set up Google OAuth2 credentials (Gmail + Calendar) via loopback flow."""
+    import socket
+    import threading
+    import webbrowser
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
     from deadline_agent.auth import TokenManager
     from deadline_agent.config import settings
 
@@ -750,6 +912,41 @@ def auth_google() -> None:
         click.echo("Download from: https://console.cloud.google.com/apis/credentials")
         return
 
+    # Bind an ephemeral loopback port — Google's replacement for the deprecated OOB flow.
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    redirect_uri = f"http://127.0.0.1:{port}"
+
+    received: dict[str, str] = {}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            parsed = urllib.parse.urlparse(self.path)
+            params = urllib.parse.parse_qs(parsed.query)
+            code = (params.get("code") or [""])[0]
+            error = (params.get("error") or [""])[0]
+            if code:
+                received["code"] = code
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(b"<h2>Auth complete.</h2> You can close this tab.")
+                return
+            if error:
+                received["error"] = error
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(f"<h2>Auth failed:</h2> {error}".encode())
+                return
+            # Ignore unrelated requests (favicon, preflight, etc.)
+            self.send_response(404)
+            self.end_headers()
+
+        def log_message(self, *_args: object) -> None:  # silence stdout
+            return
+
     scopes = [
         "https://www.googleapis.com/auth/gmail.modify",
         "https://www.googleapis.com/auth/calendar",
@@ -757,7 +954,7 @@ def auth_google() -> None:
     auth_url = "https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode(
         {
             "client_id": creds["client_id"],
-            "redirect_uri": "urn:ietf:wg:oauth:2.0:oob",
+            "redirect_uri": redirect_uri,
             "response_type": "code",
             "scope": " ".join(scopes),
             "access_type": "offline",
@@ -765,12 +962,29 @@ def auth_google() -> None:
         }
     )
 
-    click.echo("Open this URL in your browser:")
-    click.echo(auth_url)
-    click.echo()
-    code = click.prompt("Paste the authorization code")
+    server = HTTPServer(("127.0.0.1", port), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
 
-    success = asyncio.run(tm.exchange_code(code))
+    click.echo(f"Listening on {redirect_uri} for OAuth callback...")
+    click.echo("Opening browser. If it doesn't open, visit this URL manually:")
+    click.echo(auth_url)
+    try:
+        webbrowser.open(auth_url)
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        while "code" not in received and "error" not in received:
+            thread.join(timeout=0.5)
+    finally:
+        server.shutdown()
+
+    if "error" in received:
+        click.echo(f"OAuth failed: {received['error']}", err=True)
+        return
+
+    success = asyncio.run(tm.exchange_code(received["code"], redirect_uri=redirect_uri))
     if success:
         click.echo("Google authentication successful. Token saved.")
     else:
@@ -1323,3 +1537,178 @@ def recruiting_classify(company: str, tier: str) -> None:
         app.company_tier = tier
         session.commit()
         click.echo(f"Set {app.company_name} → {tier}")
+
+
+@cli.command("day")
+@click.option("--date", "target_date", default=None, help="YYYY-MM-DD, defaults to today")
+def day_summary(target_date: str | None) -> None:
+    """Show today's inferred activity timeline."""
+    import json
+    from datetime import date as date_type
+
+    from deadline_agent.store.reconstruction_repository import ReconstructionRepository
+
+    if target_date:
+        try:
+            dt = date_type.fromisoformat(target_date)
+        except ValueError:
+            click.echo(f"Invalid date format: {target_date}. Use YYYY-MM-DD.")
+            return
+    else:
+        dt = datetime.now(ZoneInfo("America/New_York")).date()
+
+    date_str = dt.isoformat()
+
+    with SessionLocal() as session:
+        repo = ReconstructionRepository(session)
+        rec = repo.get_by_date(date_str)
+
+        if rec is None:
+            click.echo(f"No reconstruction for {date_str}. Generating now...")
+            from deadline_agent.behavioral.daily_reconstruction import reconstruct_day
+
+            rec = asyncio.run(reconstruct_day(session, dt))
+            session.commit()
+
+        segments = json.loads(rec.timeline_json)
+        est = ZoneInfo("America/New_York")
+
+        click.echo(f"\n  Day Summary — {date_str}")
+        click.echo(f"  Overall confidence: {rec.overall_confidence:.0%}")
+        click.echo("  " + "-" * 50)
+
+        type_icons = {
+            "work": "W",
+            "meeting": "M",
+            "idle": "-",
+            "email": "E",
+            "unknown": "?",
+        }
+
+        for seg in segments:
+            icon = type_icons.get(seg.get("activity_type", "?"), "?")
+            conf = seg.get("confidence", 0)
+            # Confidence indicator
+            if conf >= 0.8:
+                conf_str = ""
+            elif conf >= 0.6:
+                conf_str = " ~"
+            else:
+                conf_str = " ?"
+
+            # Format times
+            try:
+                start = datetime.fromisoformat(seg["start_time"]).astimezone(est)
+                end = datetime.fromisoformat(seg["end_time"]).astimezone(est)
+                time_str = f"{start.strftime('%-I:%M %p')} - {end.strftime('%-I:%M %p')}"
+            except (ValueError, KeyError):
+                time_str = "??:?? - ??:??"
+
+            desc = seg.get("description", seg.get("task_title", ""))
+            confirmed = seg.get("confirmed")
+            conf_mark = ""
+            if confirmed is True:
+                conf_mark = " [confirmed]"
+            elif confirmed is False:
+                conf_mark = " [denied]"
+
+            click.echo(f"  [{icon}] {time_str}  {desc}{conf_str}{conf_mark}")
+
+        click.echo()
+        if rec.narrative:
+            click.echo(f"  {rec.narrative}")
+        click.echo()
+
+
+@cli.command("simulate")
+@click.argument("scenario")
+@click.option("--follow-up", "-f", default=None, help="Session ID for follow-up simulation")
+def simulate_cmd(scenario: str, follow_up: str | None) -> None:
+    """Run a what-if simulation: 'What if I skip class tomorrow?'"""
+    from deadline_agent.reasoning.intervention_engine import init_intervention_engine
+
+    # Ensure intervention engine is initialized for CLI context
+    try:
+        from deadline_agent.reasoning.intervention_engine import get_intervention_engine
+
+        get_intervention_engine()
+    except RuntimeError:
+        init_intervention_engine(SessionLocal)
+
+    from deadline_agent.reasoning.simulation import simulate_scenario_v2
+
+    with SessionLocal() as session:
+        result = asyncio.run(simulate_scenario_v2(session, scenario, follow_up))
+
+        click.echo(f"\n  Scenario: {result.scenario}")
+        click.echo(f"  Confidence: {result.confidence}")
+        if result.confidence_reason:
+            click.echo(f"  Reason: {result.confidence_reason}")
+
+        if result.risk_deltas:
+            click.echo("\n  Risk Deltas:")
+            click.echo("  " + "-" * 60)
+            for d in result.risk_deltas:
+                if abs(d.delta) < 0.01:
+                    continue
+                sign = "+" if d.delta > 0 else ""
+                arrow = "^" if d.delta > 0 else "v"
+                course = f" ({d.course})" if d.course else ""
+                click.echo(
+                    f"  {arrow} {d.task_title}{course}: "
+                    f"{d.p_miss_before:.0%} → {d.p_miss_after:.0%} "
+                    f"({sign}{d.delta:.0%}) "
+                    f"[{d.risk_level_before} → {d.risk_level_after}]"
+                )
+
+        if result.drop_analysis:
+            da = result.drop_analysis
+            click.echo(f"\n  Drop Analysis: {da['dropped_task']}")
+            click.echo(f"  Freed: {da['freed_hours']:.1f}h")
+            click.echo(f"  Net risk change: {da['net_risk_change']:+.0%}")
+            for b in da.get("beneficiaries", []):
+                click.echo(f"    Benefits: {b['task_title']} ({b['delta']:+.0%})")
+
+        if result.recommendation:
+            click.echo(f"\n  Recommendation: {result.recommendation}")
+
+        if result.weekly_projection:
+            click.echo(f"\n  Projection:\n  {result.weekly_projection[:500]}")
+
+        click.echo(f"\n  Session ID: {result.session_id} (use -f to follow up)")
+        click.echo()
+
+
+@cli.command("voice")
+def voice_log_cmd() -> None:
+    """Record a voice update (up to 15 seconds) and apply it."""
+    from deadline_agent.voice.pipeline import (
+        apply_update,
+        extract_structured_update,
+        record_and_transcribe,
+    )
+
+    click.echo("Recording for up to 15 seconds...")
+
+    try:
+        text = record_and_transcribe(max_seconds=15)
+    except ImportError as e:
+        click.echo(f"Missing dependency: {e}")
+        return
+    except Exception as e:
+        click.echo(f"Recording failed: {e}")
+        return
+
+    if not text.strip():
+        click.echo("No speech detected.")
+        return
+
+    click.echo(f"Transcribed: {text}")
+
+    with SessionLocal() as session:
+        update = asyncio.run(extract_structured_update(text, session))
+        click.echo(f"Detected: {update.get('update_type', 'unknown')}")
+
+        result = asyncio.run(apply_update(update, session))
+        session.commit()
+        click.echo(result)

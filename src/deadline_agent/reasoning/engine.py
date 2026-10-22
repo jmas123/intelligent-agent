@@ -72,6 +72,12 @@ DIGEST_SYSTEM_PROMPT = (
     "- If TASK AFFECT data is available, weave it in naturally. Don't just list affects — "
     "use them to explain task order. 'Start with the project since you enjoy those — "
     "then tackle the essay you've been avoiding.'\n"
+    "- If PRIORITY RANKING data is available, lead with it. The ranking represents the system's "
+    "best answer to 'what should I do right now?' — use it to structure the briefing. "
+    "Don't just list the ranking — explain why the top priority matters most.\n"
+    "- If RISK ASSESSMENT data is available, weave it in naturally. Say things like "
+    "'you're 72% likely to miss X unless you act today' — concrete probabilities create urgency. "
+    "Reference hours needed vs available when it makes the point sharper.\n"
     "- Be conversational and direct, not formal."
 )
 
@@ -156,16 +162,48 @@ async def _call_ollama(system: str, user: str, schema: dict[str, Any]) -> str:
         raise ExtractionError(f"Ollama reasoning failed: {e}") from e
 
 
-async def _call_anthropic(system: str, user: str, *, schema: dict[str, Any] | None = None) -> str:
+_anthropic_client: Any = None
+
+
+def get_anthropic_client() -> Any:
+    """Return a shared AsyncAnthropic client (lazy singleton)."""
+    global _anthropic_client
+    if _anthropic_client is None:
+        from anthropic import AsyncAnthropic
+
+        if not settings.anthropic_api_key:
+            raise ExtractionError("Anthropic API key not configured")
+        _anthropic_client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+    return _anthropic_client
+
+
+async def _call_anthropic(
+    system: str,
+    user: str,
+    *,
+    schema: dict[str, Any] | None = None,
+    model: str | None = None,
+) -> str:
     """Call Anthropic API for reasoning. Uses tool calling when schema is provided.
+
+    Args:
+        system: System prompt text.
+        user: User prompt text.
+        schema: If provided, forces structured JSON output via tool calling.
+        model: Override the default model (e.g. use anthropic_light_model for
+               cheaper tasks). Defaults to settings.anthropic_model.
 
     Raises ExtractionError on failure.
     """
-    from anthropic import AsyncAnthropic
+    client = get_anthropic_client()
+    resolved_model = model or settings.anthropic_model
 
-    if not settings.anthropic_api_key:
-        raise ExtractionError("Anthropic API key not configured")
-    client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+    # Use cache_control on system prompt to enable Anthropic prompt caching.
+    # Cached system prompt tokens cost 90% less on cache hits (5-min TTL).
+    system_with_cache = [
+        {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+    ]
+
     try:
         if schema is not None:
             # Structured output via tool calling
@@ -175,24 +213,26 @@ async def _call_anthropic(system: str, user: str, *, schema: dict[str, Any] | No
                 "input_schema": schema,
             }
             response = await client.messages.create(  # type: ignore[call-overload]
-                model=settings.anthropic_model,
+                model=resolved_model,
                 max_tokens=1024,
-                system=system,
+                system=system_with_cache,
                 messages=[{"role": "user", "content": user}],
                 tools=[tool],
                 tool_choice={"type": "tool", "name": "reasoning_output"},
             )
+            _log_anthropic_usage(response, resolved_model)
             for block in response.content:
                 if block.type == "tool_use":
                     return json.dumps(block.input)
             raise ExtractionError("Anthropic returned no tool_use block")
         else:
             response = await client.messages.create(
-                model=settings.anthropic_model,
+                model=resolved_model,
                 max_tokens=1024,
-                system=system,
+                system=system_with_cache,
                 messages=[{"role": "user", "content": user}],
             )
+            _log_anthropic_usage(response, resolved_model)
             return response.content[0].text  # type: ignore[union-attr]
     except ExtractionError:
         raise
@@ -200,15 +240,71 @@ async def _call_anthropic(system: str, user: str, *, schema: dict[str, Any] | No
         raise ExtractionError(f"Anthropic reasoning failed: {e}") from e
 
 
+def _log_anthropic_usage(response: Any, model: str) -> None:
+    """Log token usage from an Anthropic API response."""
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return
+    cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+    cache_create = getattr(usage, "cache_creation_input_tokens", 0) or 0
+    logger.info(
+        "Anthropic usage: model=%s input=%d output=%d cache_read=%d cache_create=%d",
+        model,
+        getattr(usage, "input_tokens", 0),
+        getattr(usage, "output_tokens", 0),
+        cache_read,
+        cache_create,
+    )
+
+
 def _use_anthropic_primary() -> bool:
     """Check if Anthropic should be the primary reasoning provider."""
     return settings.reasoning_provider == "anthropic"
+
+
+# --- Ollama circuit breaker ---
+# Prevents repeated Ollama timeouts from causing a cascade of Anthropic
+# fallback calls (which are expensive).  After ``_OLLAMA_FAILURE_THRESHOLD``
+# consecutive failures we skip Ollama for ``_OLLAMA_COOLDOWN_SECONDS``.
+import time as _time
+
+_ollama_consecutive_failures: int = 0
+_ollama_circuit_open_until: float = 0.0
+_OLLAMA_FAILURE_THRESHOLD: int = 3
+_OLLAMA_COOLDOWN_SECONDS: float = 300.0  # 5 minutes
+
+
+def _ollama_circuit_open() -> bool:
+    """Return True if the Ollama circuit breaker is tripped."""
+    return _time.monotonic() < _ollama_circuit_open_until
+
+
+def _record_ollama_failure() -> None:
+    global _ollama_consecutive_failures, _ollama_circuit_open_until
+    _ollama_consecutive_failures += 1
+    if _ollama_consecutive_failures >= _OLLAMA_FAILURE_THRESHOLD:
+        _ollama_circuit_open_until = _time.monotonic() + _OLLAMA_COOLDOWN_SECONDS
+        logger.warning(
+            "Ollama circuit breaker OPEN — skipping Ollama for %.0fs after %d consecutive failures",
+            _OLLAMA_COOLDOWN_SECONDS,
+            _ollama_consecutive_failures,
+        )
+
+
+def _record_ollama_success() -> None:
+    global _ollama_consecutive_failures, _ollama_circuit_open_until
+    if _ollama_consecutive_failures > 0:
+        logger.info("Ollama circuit breaker reset — Ollama healthy again")
+    _ollama_consecutive_failures = 0
+    _ollama_circuit_open_until = 0.0
 
 
 async def call_llm(
     system: str,
     user: str,
     schema: dict[str, Any] | None = None,
+    *,
+    model: str | None = None,
 ) -> str:
     """General-purpose LLM call with provider routing and fallback.
 
@@ -216,20 +312,30 @@ async def call_llm(
     (via Ollama format or Anthropic tool calling).  Without a schema, the raw
     text response is returned.
 
+    Args:
+        model: Anthropic model override passed through to ``_call_anthropic``.
+
     Raises ``ExtractionError`` if both providers fail.
     """
     if _use_anthropic_primary():
         try:
-            return await _call_anthropic(system, user, schema=schema)
+            return await _call_anthropic(system, user, schema=schema, model=model)
         except ExtractionError:
             return await _call_ollama(system, user, schema or {})
     else:
-        try:
-            return await _call_ollama(system, user, schema or {})
-        except ExtractionError:
-            if settings.use_anthropic_fallback and settings.anthropic_api_key:
-                return await _call_anthropic(system, user, schema=schema)
-            raise
+        # Ollama primary — check circuit breaker first
+        if _ollama_circuit_open():
+            logger.debug("Ollama circuit open — skipping straight to Anthropic fallback")
+        else:
+            try:
+                result = await _call_ollama(system, user, schema or {})
+                _record_ollama_success()
+                return result
+            except ExtractionError:
+                _record_ollama_failure()
+        if settings.use_anthropic_fallback and settings.anthropic_api_key:
+            return await _call_anthropic(system, user, schema=schema, model=model)
+        raise ExtractionError("Ollama unavailable and Anthropic fallback not configured")
 
 
 _last_insight_snapshot_hash: str | None = None
@@ -253,6 +359,13 @@ async def generate_insights(session: Any) -> list[Insight]:
 
     snapshot = build_state_snapshot(session)
     prompt = snapshot.to_prompt()
+
+    # Expire stale insights first — must happen even on cycles that generate
+    # nothing, otherwise idle periods leave old insights on screen forever.
+    repo = InsightRepository(session)
+    expired = repo.clear_stale()
+    if expired:
+        logger.info("Expired %d stale insight(s)", expired)
 
     if not snapshot.due_today and not snapshot.due_this_week and not snapshot.overdue:
         logger.info("No upcoming tasks — skipping insight generation")
@@ -304,9 +417,6 @@ async def generate_insights(session: Any) -> list[Insight]:
                 return []
 
     # Store insights
-    repo = InsightRepository(session)
-    repo.clear_stale(max_age_hours=24)
-
     stored: list[Insight] = []
     for item in insights_data[:5]:  # Cap at 5
         insight = repo.create(
@@ -374,7 +484,9 @@ async def generate_summary(session: Any) -> str | None:
     if not ctx.due_today and not ctx.due_this_week and not ctx.overdue:
         return None
 
-    prompt = ctx.to_prompt()
+    # Use reduced context for digest — skip history, recruiting, social graph, etc.
+    from deadline_agent.reasoning.state import StateSnapshot
+    prompt = ctx.to_prompt(sections=StateSnapshot.SECTIONS_DIGEST)
 
     # Inject active insights so the digest can reference them
     repo = InsightRepository(session)
@@ -405,10 +517,12 @@ async def generate_summary(session: Any) -> str | None:
         except (json.JSONDecodeError, AttributeError):
             return raw
 
+    # Use the light model for digest — it's a summary task, not deep reasoning
+    light = settings.anthropic_light_model
     result: str | None = None
     if _use_anthropic_primary():
         try:
-            result = await _call_anthropic(DIGEST_SYSTEM_PROMPT, prompt)
+            result = await _call_anthropic(DIGEST_SYSTEM_PROMPT, prompt, model=light)
         except ExtractionError:
             try:
                 raw = await _call_ollama(DIGEST_SYSTEM_PROMPT, prompt, summary_schema)
@@ -422,7 +536,7 @@ async def generate_summary(session: Any) -> str | None:
         except ExtractionError:
             if settings.use_anthropic_fallback and settings.anthropic_api_key:
                 try:
-                    result = await _call_anthropic(DIGEST_SYSTEM_PROMPT, prompt)
+                    result = await _call_anthropic(DIGEST_SYSTEM_PROMPT, prompt, model=light)
                 except ExtractionError:
                     pass
 

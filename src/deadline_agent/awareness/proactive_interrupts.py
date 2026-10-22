@@ -4,11 +4,6 @@ import logging
 from typing import Any
 
 from deadline_agent.events import SESSION_STARTED, Event, EventBus
-from deadline_agent.notifications.channels import (
-    Notification,
-    NotificationPriority,
-    notification_router,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -36,14 +31,20 @@ class ProactiveInterruptHandler:
             with self._session_factory() as session:
                 context = self._build_interrupt_context(session, life_track)
                 if context:
-                    await notification_router.send(
-                        Notification(
-                            title="Before you start",
-                            body=context,
-                            priority=NotificationPriority.LOW,
-                            category="session",
-                        )
+                    from deadline_agent.reasoning.intervention_engine import (
+                        get_intervention_engine,
                     )
+
+                    engine = get_intervention_engine()
+                    await engine.evaluate(
+                        session,
+                        task_id=None,
+                        risk_level="medium",
+                        category="session",
+                        title="Before you start",
+                        body=context,
+                    )
+                    session.commit()
                     logger.info("Proactive interrupt sent: %s", context[:80])
         except Exception:
             logger.exception("Proactive interrupt error")

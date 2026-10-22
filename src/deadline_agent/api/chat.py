@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from deadline_agent.api.schemas import (
     ActionResponse,
+    CreateTaskRequest,
     AmbientNotificationResponse,
     ApplicationResponse,
     ApproveActionRequest,
@@ -40,13 +41,32 @@ from deadline_agent.api.schemas import (
     RecruitingPipelineResponse,
     ResponseRateEntry,
     FitScoreEntry,
+    InterventionBudget,
+    InterventionEscalationResponse,
+    DailyReconstructionResponse,
+    DailyReconstructionSegment,
+    InterventionRecordResponse,
+    InterventionStatsResponse,
+    InterventionTierStat,
     MeetingBriefingResponse,
+    MicroConfirmationAction,
+    MicroConfirmationResponse,
+    SessionBriefingResponse,
+    PrioritiesListResponse,
+    PriorityItemResponse,
     RelationshipResponse,
+    RiskListResponse,
+    TaskRiskResponse,
     SemesterRecordResponse,
     SetLifeContextRequest,
     SimulateRequest,
+    SimulateRequestV2,
     SimulateResponse,
+    SimulateResponseV2,
     SimulationImpact,
+    ScenarioRiskDeltaResponse,
+    DropAnalysisResponse,
+    ProjectedScheduleGap,
     SignalEntry,
     StatusUpdate,
     TaskCountByStatus,
@@ -66,8 +86,42 @@ USER_TZ = ZoneInfo("America/New_York")
 DBSession = Annotated[Session, Depends(get_session)]
 
 
-def _task_to_response(task: Task) -> TaskResponse:
+def _task_to_response(task: Task, session: Session | None = None) -> TaskResponse:
     urgency = "!" * task.urgency_score + f" ({task.urgency_score}/5)"
+
+    # Phase 27/28: Enrich with priority and risk data
+    priority_rank = None
+    priority_score = None
+    priority_action = None
+    risk_level = None
+    risk_pct = None
+    risk_summary = None
+
+    if session is not None:
+        try:
+            from deadline_agent.store.priority_repository import PriorityRepository
+
+            p_repo = PriorityRepository(session)
+            ranking = p_repo.get_for_task(task.id)
+            if ranking:
+                priority_rank = ranking.rank
+                priority_score = ranking.score
+                priority_action = ranking.suggested_action
+        except Exception:
+            pass
+
+        try:
+            from deadline_agent.store.risk_repository import RiskRepository
+
+            r_repo = RiskRepository(session)
+            risk = r_repo.get_for_task(task.id)
+            if risk:
+                risk_level = risk.risk_level
+                risk_pct = int(risk.probability_of_missing * 100)
+                risk_summary = risk.summary
+        except Exception:
+            pass
+
     return TaskResponse(
         id=task.id,
         title=task.title,
@@ -77,6 +131,12 @@ def _task_to_response(task: Task) -> TaskResponse:
         course=task.course,
         urgency=urgency,
         status=task.status,
+        priority_rank=priority_rank,
+        priority_score=priority_score,
+        priority_action=priority_action,
+        risk_level=risk_level,
+        risk_pct=risk_pct,
+        risk_summary=risk_summary,
     )
 
 
@@ -105,7 +165,7 @@ def list_tasks(
     limit: int = 50,
 ) -> list[TaskResponse]:
     """List tasks with optional filters."""
-    stmt = select(Task).order_by(Task.due_date_iso.asc())
+    stmt = select(Task).order_by(Task.due_date_iso.asc().nulls_last())
     if status is not None:
         stmt = stmt.where(Task.status == status)
     if source is not None:
@@ -124,7 +184,42 @@ def list_tasks(
         )
     stmt = stmt.limit(limit)
     tasks = list(session.scalars(stmt).all())
-    return [_task_to_response(t) for t in tasks]
+    return [_task_to_response(t, session) for t in tasks]
+
+
+@router.post("/tasks")
+def create_task(session: DBSession, body: CreateTaskRequest) -> TaskResponse:
+    """Manually create a task."""
+    import hashlib
+    from datetime import UTC, datetime
+
+    raw_hash = hashlib.sha256(
+        f"manual:{body.title}:{body.due_date or ''}:{body.type}:{datetime.now(UTC).isoformat()}".encode()
+    ).hexdigest()
+
+    # Normalize date-only input to end-of-day ISO timestamp
+    due_iso = body.due_date
+    if due_iso and "T" not in due_iso:
+        due_iso = f"{due_iso}T23:59:00+00:00"
+
+    from deadline_agent.store.repository import TaskRepository
+
+    repo = TaskRepository(session)
+    task = repo.create_task(
+        {
+            "title": body.title,
+            "due_date_iso": due_iso,
+            "source": "manual",
+            "type": body.type,
+            "course": body.course,
+            "urgency_score": body.urgency,
+            "confidence": 1.0,
+            "raw_hash": raw_hash,
+        }
+    )
+    if task is None:
+        raise HTTPException(status_code=409, detail="Task already exists")
+    return _task_to_response(task, session)
 
 
 @router.get("/tasks/{task_id}")
@@ -133,7 +228,7 @@ def get_task(session: DBSession, task_id: int) -> TaskResponse:
     task = session.get(Task, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
-    return _task_to_response(task)
+    return _task_to_response(task, session)
 
 
 @router.patch("/tasks/{task_id}/status")
@@ -150,7 +245,7 @@ def update_task_status(session: DBSession, task_id: int, body: StatusUpdate) -> 
     task.status = body.status
     session.commit()
     session.refresh(task)
-    return _task_to_response(task)
+    return _task_to_response(task, session)
 
 
 @router.get("/digest")
@@ -177,7 +272,7 @@ def get_context(session: DBSession) -> ContextSnapshot:
             .where(Task.status == "pending")
             .where(Task.due_date_iso >= start_of_today)
             .where(Task.due_date_iso < end_of_today)
-            .order_by(Task.due_date_iso.asc())
+            .order_by(Task.due_date_iso.asc().nulls_last())
         ).all()
     )
 
@@ -188,7 +283,7 @@ def get_context(session: DBSession) -> ContextSnapshot:
             .where(Task.status == "pending")
             .where(Task.due_date_iso >= end_of_today)
             .where(Task.due_date_iso < end_of_week)
-            .order_by(Task.due_date_iso.asc())
+            .order_by(Task.due_date_iso.asc().nulls_last())
         ).all()
     )
 
@@ -199,7 +294,7 @@ def get_context(session: DBSession) -> ContextSnapshot:
             .where(Task.status == "pending")
             .where(Task.due_date_iso < start_of_today)
             .where(Task.due_date_iso.is_not(None))
-            .order_by(Task.due_date_iso.asc())
+            .order_by(Task.due_date_iso.asc().nulls_last())
         ).all()
     )
 
@@ -266,7 +361,7 @@ def get_context(session: DBSession) -> ContextSnapshot:
         pass
 
     def _enrich(t: Task) -> TaskResponse:
-        resp = _task_to_response(t)
+        resp = _task_to_response(t, session)
         ntype = t.type.lower().strip()
         resp.affect = affect_map.get(ntype)
         return resp
@@ -679,6 +774,118 @@ async def simulate(session: DBSession, body: SimulateRequest) -> SimulateRespons
     )
 
 
+@router.post("/simulate/v2")
+async def simulate_v2(session: DBSession, body: SimulateRequestV2) -> SimulateResponseV2:
+    """Run an enhanced what-if simulation with grounded risk deltas."""
+    from deadline_agent.extraction.extractor import ExtractionError
+    from deadline_agent.reasoning.simulation import simulate_scenario_v2
+
+    try:
+        result = await simulate_scenario_v2(session, body.scenario, body.session_id)
+    except ExtractionError as e:
+        raise HTTPException(status_code=503, detail=f"LLM unavailable: {e}") from e
+
+    return SimulateResponseV2(
+        scenario=result.scenario,
+        session_id=result.session_id or "",
+        confidence=result.confidence,
+        confidence_reason=result.confidence_reason,
+        projected_impacts=[
+            SimulationImpact(**impact) for impact in result.projected_impacts
+        ],
+        weekly_projection=result.weekly_projection,
+        recommendation=result.recommendation,
+        data_density=result.data_density,
+        risk_deltas=[
+            ScenarioRiskDeltaResponse(
+                task_id=d.task_id,
+                task_title=d.task_title,
+                course=d.course,
+                p_miss_before=d.p_miss_before,
+                p_miss_after=d.p_miss_after,
+                delta=d.delta,
+                risk_level_before=d.risk_level_before,
+                risk_level_after=d.risk_level_after,
+                hours_available_before=d.hours_available_before,
+                hours_available_after=d.hours_available_after,
+            )
+            for d in result.risk_deltas
+        ],
+        projected_schedule=[
+            ProjectedScheduleGap(
+                start=g["start"],
+                end=g["end"],
+                duration_minutes=g["duration_minutes"],
+            )
+            for g in result.projected_schedule
+        ],
+        drop_analysis=DropAnalysisResponse(
+            dropped_task=result.drop_analysis["dropped_task"],
+            freed_hours=result.drop_analysis["freed_hours"],
+            beneficiaries=result.drop_analysis.get("beneficiaries", []),
+            net_risk_change=result.drop_analysis.get("net_risk_change", 0),
+        )
+        if result.drop_analysis
+        else None,
+    )
+
+
+@router.get("/priorities")
+def get_priorities(session: DBSession, limit: int = 5) -> PrioritiesListResponse:
+    """Get current ranked priorities."""
+    from deadline_agent.reasoning.priority_engine import get_current_priorities
+
+    items = get_current_priorities(session, limit=limit)
+    return PrioritiesListResponse(
+        priorities=[PriorityItemResponse(**item) for item in items],
+        computed_at=(
+            items[0]["computed_at"] if items and "computed_at" in items[0] else None
+        ),
+    )
+
+
+@router.get("/risk")
+def get_risk(session: DBSession) -> RiskListResponse:
+    """Get current risk assessments for all pending tasks."""
+    from deadline_agent.reasoning.risk_engine import get_current_risks
+
+    items = get_current_risks(session)
+    return RiskListResponse(
+        risks=[TaskRiskResponse(**item) for item in items],
+        high_risk_count=sum(1 for i in items if i["risk_level"] == "high"),
+        critical_count=sum(1 for i in items if i["risk_level"] == "critical"),
+    )
+
+
+@router.post("/risk/recompute")
+async def recompute_risk(session: DBSession) -> RiskListResponse:
+    """Force recompute risk assessments."""
+    from deadline_agent.reasoning.risk_engine import compute_task_risks, get_current_risks
+
+    await compute_task_risks(session)
+    items = get_current_risks(session)
+    return RiskListResponse(
+        risks=[TaskRiskResponse(**item) for item in items],
+        high_risk_count=sum(1 for i in items if i["risk_level"] == "high"),
+        critical_count=sum(1 for i in items if i["risk_level"] == "critical"),
+    )
+
+
+@router.post("/priorities/recompute")
+async def recompute_priorities(session: DBSession) -> PrioritiesListResponse:
+    """Force recompute priority rankings."""
+    from deadline_agent.reasoning.priority_engine import (
+        compute_priorities,
+        get_current_priorities,
+    )
+
+    await compute_priorities(session)
+    items = get_current_priorities(session, limit=10)
+    return PrioritiesListResponse(
+        priorities=[PriorityItemResponse(**item) for item in items],
+    )
+
+
 @router.post("/analyze")
 def run_analysis(session: DBSession) -> dict[str, object]:
     """Run behavioral analysis: infer work sessions and detect patterns."""
@@ -769,8 +976,12 @@ def list_patterns(session: DBSession) -> list[dict[str, object]]:
         p for p in repo.get_all()
         if p.confidence >= settings.min_pattern_confidence
     ]
-    return [
-        {
+    results = []
+    for p in patterns:
+        desc = _format_pattern(p)
+        if not desc:
+            continue
+        results.append({
             "id": p.id,
             "pattern_type": p.pattern_type,
             "pattern_key": p.pattern_key,
@@ -778,10 +989,9 @@ def list_patterns(session: DBSession) -> list[dict[str, object]]:
             "sample_count": p.sample_count,
             "confidence": p.confidence,
             "updated_at": p.updated_at.isoformat() if p.updated_at else "",
-            "description": _format_pattern(p),
-        }
-        for p in patterns
-    ]
+            "description": desc,
+        })
+    return results
 
 
 @router.get("/affects")
@@ -1118,7 +1328,7 @@ def get_recruiting_pipeline(session: DBSession) -> RecruitingPipelineResponse:
             .where(Task.status == "pending")
             .where(Task.type == "interview_prep")
             .where(Task.due_date_iso >= now.isoformat())
-            .order_by(Task.due_date_iso.asc())
+            .order_by(Task.due_date_iso.asc().nulls_last())
             .limit(10)
         ).all()
     )
@@ -1621,4 +1831,249 @@ async def next_meeting_briefing(
         minutes_until=int(minutes_until),
         briefing=briefing or "No briefing available.",
         attendee_count=len(attendee_context),
+    )
+
+
+# ── Brain tab endpoints (Intervention, Micro-confirmations, Briefing) ──
+
+
+@router.get("/interventions")
+def list_interventions(
+    session: DBSession, limit: int = 30
+) -> list[InterventionRecordResponse]:
+    """List recent intervention records (fired and suppressed)."""
+    from deadline_agent.store.intervention_repository import InterventionRepository
+
+    repo = InterventionRepository(session)
+    records = repo.get_recent_records(limit=limit)
+    return [
+        InterventionRecordResponse(
+            id=r.id,
+            task_id=r.task_id,
+            risk_level=r.risk_level,
+            intervention_tier=r.intervention_tier,
+            category=r.category,
+            title=r.title,
+            body=r.body,
+            fired=r.fired,
+            suppression_reason=r.suppression_reason,
+            user_acted=r.user_acted,
+            created_at=r.created_at.isoformat() if r.created_at else "",
+        )
+        for r in records
+    ]
+
+
+@router.get("/intervention-stats")
+def get_intervention_stats(session: DBSession) -> InterventionStatsResponse:
+    """Get intervention budget, quiet hours, effectiveness, and escalation count."""
+    from deadline_agent.config import settings
+    from deadline_agent.store.intervention_repository import InterventionRepository
+
+    repo = InterventionRepository(session)
+
+    # Budget
+    fired_today = repo.count_fired_today()
+    max_per_day = settings.intervention_max_interrupts_per_day
+
+    # Quiet hours
+    now = datetime.now(USER_TZ)
+    q_start_str = settings.intervention_quiet_hours_start
+    q_end_str = settings.intervention_quiet_hours_end
+    try:
+        q_start_h, q_start_m = (int(x) for x in q_start_str.split(":"))
+        q_end_h, q_end_m = (int(x) for x in q_end_str.split(":"))
+        current_minutes = now.hour * 60 + now.minute
+        start_minutes = q_start_h * 60 + q_start_m
+        end_minutes = q_end_h * 60 + q_end_m
+        if start_minutes > end_minutes:  # crosses midnight
+            quiet_active = current_minutes >= start_minutes or current_minutes < end_minutes
+        else:
+            quiet_active = start_minutes <= current_minutes < end_minutes
+    except (ValueError, AttributeError):
+        quiet_active = False
+
+    # Effectiveness
+    raw_stats = repo.get_effectiveness_stats(days=30)
+    effectiveness = [
+        InterventionTierStat(tier=tier, total=s["total"], acted=s["acted"], rate=s["rate"])
+        for tier, s in raw_stats.items()
+    ]
+
+    # Pending escalations count
+    pending = repo.get_pending_escalations()
+
+    return InterventionStatsResponse(
+        budget=InterventionBudget(
+            fired_today=fired_today,
+            max_per_day=max_per_day,
+            quiet_hours_active=quiet_active,
+            quiet_hours_start=q_start_str,
+            quiet_hours_end=q_end_str,
+        ),
+        effectiveness=effectiveness,
+        escalations_pending=len(pending),
+    )
+
+
+@router.get("/intervention-escalations")
+def list_intervention_escalations(
+    session: DBSession,
+) -> list[InterventionEscalationResponse]:
+    """List pending intervention escalations."""
+    from deadline_agent.store.intervention_repository import InterventionRepository
+
+    repo = InterventionRepository(session)
+    pending = repo.get_pending_escalations()
+    return [
+        InterventionEscalationResponse(
+            id=e.id,
+            task_id=e.task_id,
+            current_tier=e.current_tier,
+            next_tier=e.next_tier,
+            escalate_after=e.escalate_after.isoformat() if e.escalate_after else "",
+            created_at=e.created_at.isoformat() if e.created_at else "",
+        )
+        for e in pending
+    ]
+
+
+@router.get("/micro-confirmations")
+def list_micro_confirmations(
+    session: DBSession, date: str | None = None
+) -> list[MicroConfirmationResponse]:
+    """List timeline segments needing confirmation for today (or a given date)."""
+    import json
+
+    from deadline_agent.config import settings
+    from deadline_agent.store.reconstruction_repository import ReconstructionRepository
+
+    if date is None:
+        date = datetime.now(USER_TZ).strftime("%Y-%m-%d")
+
+    repo = ReconstructionRepository(session)
+    rec = repo.get_by_date(date)
+    if not rec:
+        return []
+
+    segments = json.loads(rec.timeline_json)
+    results = []
+    for i, seg in enumerate(segments):
+        conf = seg.get("confidence", 1.0)
+        if conf < settings.micro_confirmation_threshold and seg.get("confirmed") is None:
+            results.append(
+                MicroConfirmationResponse(
+                    date=date,
+                    segment_index=i,
+                    task_id=seg.get("task_id"),
+                    task_title=seg.get("task_title"),
+                    start_time=seg.get("start_time", ""),
+                    end_time=seg.get("end_time", ""),
+                    confidence=conf,
+                    confirmed=None,
+                )
+            )
+
+    return results
+
+
+@router.post("/micro-confirmations/respond")
+def respond_micro_confirmation(
+    session: DBSession, body: MicroConfirmationAction
+) -> dict:
+    """Respond to a micro-confirmation (yes/no)."""
+    from deadline_agent.behavioral.micro_confirmations import (
+        process_confirmation_response,
+    )
+
+    process_confirmation_response(session, body.date, body.segment_index, body.confirmed)
+    session.commit()
+    return {"ok": True, "date": body.date, "segment_index": body.segment_index, "confirmed": body.confirmed}
+
+
+@router.get("/daily-reconstruction")
+async def get_daily_reconstruction(
+    session: DBSession, date: str | None = None
+) -> DailyReconstructionResponse:
+    """Get the daily reconstructed timeline. Generates if not yet available."""
+    import json
+    from datetime import date as date_type
+
+    from deadline_agent.store.reconstruction_repository import ReconstructionRepository
+
+    if date:
+        try:
+            target = date_type.fromisoformat(date)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid date: {date}")
+    else:
+        from zoneinfo import ZoneInfo
+        from datetime import datetime as dt
+
+        target = dt.now(ZoneInfo("America/New_York")).date()
+
+    date_str = target.isoformat()
+    repo = ReconstructionRepository(session)
+    rec = repo.get_by_date(date_str)
+
+    if rec is None:
+        from deadline_agent.behavioral.daily_reconstruction import reconstruct_day
+
+        rec = await reconstruct_day(session, target)
+        session.commit()
+
+    segments = json.loads(rec.timeline_json)
+
+    return DailyReconstructionResponse(
+        date=rec.date,
+        overall_confidence=rec.overall_confidence,
+        user_confirmed=rec.user_confirmed,
+        narrative=rec.narrative,
+        segments=[
+            DailyReconstructionSegment(
+                start_time=s.get("start_time", ""),
+                end_time=s.get("end_time", ""),
+                activity_type=s.get("activity_type", "unknown"),
+                task_id=s.get("task_id"),
+                task_title=s.get("task_title"),
+                description=s.get("description", ""),
+                confidence=s.get("confidence", 0),
+                confidence_sources=s.get("confidence_sources"),
+                confirmed=s.get("confirmed"),
+            )
+            for s in segments
+        ],
+    )
+
+
+@router.get("/session-briefing")
+async def get_session_briefing(session: DBSession) -> SessionBriefingResponse:
+    """Phase 32 session briefing — structured + rendered text."""
+    from deadline_agent.awareness.session_intelligence import (
+        build_session_briefing,
+        format_session_briefing,
+    )
+
+    briefing = await build_session_briefing(session, life_track=None)
+    if not briefing.priorities and not briefing.extras:
+        return SessionBriefingResponse(
+            briefing=None,
+            generated_at=briefing.generated_at,
+            available_minutes=briefing.available_minutes,
+            available_label=briefing.available_label,
+            life_context=briefing.life_context,
+            next_event=briefing.next_event,
+            recommendation=briefing.recommendation,
+        )
+    return SessionBriefingResponse(
+        briefing=format_session_briefing(briefing),
+        generated_at=briefing.generated_at,
+        available_minutes=briefing.available_minutes,
+        available_label=briefing.available_label,
+        life_context=briefing.life_context,
+        next_event=briefing.next_event,
+        priorities=[p.__dict__ for p in briefing.priorities],
+        extras=briefing.extras,
+        time_blocks=[b.__dict__ for b in briefing.time_blocks],
+        recommendation=briefing.recommendation,
     )

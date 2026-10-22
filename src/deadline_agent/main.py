@@ -28,6 +28,7 @@ async def alert_scheduler() -> None:
     """Periodically check for tasks approaching deadlines and send alerts."""
     from deadline_agent.notifications.alerts import check_and_send_alerts
     from deadline_agent.notifications.no_work_alerts import check_no_work_alerts
+    from deadline_agent.reasoning.intervention_engine import get_intervention_engine
 
     interval = settings.alert_check_interval_minutes * 60
     logger.info("Alert scheduler started (every %d minutes)", settings.alert_check_interval_minutes)
@@ -38,12 +39,19 @@ async def alert_scheduler() -> None:
             continue
         try:
             with SessionLocal() as session:
-                count = check_and_send_alerts(session)
+                count = await check_and_send_alerts(session)
                 if count > 0:
                     logger.info("Sent %d pre-deadline alert(s)", count)
-                no_work_count = check_no_work_alerts(session)
+                no_work_count = await check_no_work_alerts(session)
                 if no_work_count > 0:
                     logger.info("Sent %d no-work alert(s)", no_work_count)
+
+                # Process pending escalations
+                engine = get_intervention_engine()
+                escalated = await engine.process_escalations(session)
+                if escalated:
+                    logger.info("Fired %d escalation(s)", escalated)
+                session.commit()
         except Exception:
             logger.exception("Alert scheduler error")
 
@@ -75,19 +83,28 @@ async def digest_scheduler() -> None:
             with SessionLocal() as session:
                 sent = await send_digest_v2(session)
                 if not sent:
-                    send_digest(session)
+                    await send_digest(session)
         except Exception:
             logger.exception("Digest scheduler error")
 
 
 async def reasoning_scheduler() -> None:
-    """Periodically generate proactive insights and propose actions."""
+    """Periodically generate proactive insights and propose actions.
+
+    Uses adaptive interval: doubles when idle (no tasks, no file activity),
+    halves when urgent (tasks due today). Clamped to [30min, 8hr].
+    """
     from deadline_agent.reasoning.engine import generate_insights
+    from deadline_agent.reasoning.priority_engine import compute_priorities
+    from deadline_agent.reasoning.risk_engine import compute_task_risks
     from deadline_agent.reasoning.scheduler import propose_smart_schedule
     from deadline_agent.reasoning.state import build_unified_context
 
-    interval = settings.reasoning_interval_minutes * 60
-    logger.info("Reasoning scheduler started (every %d min)", settings.reasoning_interval_minutes)
+    base_interval = settings.reasoning_interval_minutes * 60
+    interval = base_interval
+    min_interval = 30 * 60      # 30 minutes
+    max_interval = 8 * 60 * 60  # 8 hours
+    logger.info("Reasoning scheduler started (base interval %d min)", settings.reasoning_interval_minutes)
 
     while True:
         await asyncio.sleep(interval)
@@ -96,6 +113,16 @@ async def reasoning_scheduler() -> None:
                 insights = await generate_insights(session)
                 if insights:
                     logger.info("Generated %d insight(s)", len(insights))
+
+                # Compute risk assessments (before priorities, so priority can use risk)
+                risks = await compute_task_risks(session)
+                if risks:
+                    logger.info("Assessed risk for %d task(s)", len(risks))
+
+                # Compute priority rankings
+                rankings = await compute_priorities(session)
+                if rankings:
+                    logger.info("Ranked %d task(s) by priority", len(rankings))
 
                 # Propose calendar blocks for unworked tasks
                 context = await build_unified_context(session)
@@ -112,13 +139,26 @@ async def reasoning_scheduler() -> None:
                 expired = neg_repo.expire_stale(hours=24)
                 if expired:
                     logger.info("Expired %d stale negotiation session(s)", expired)
+
+                # Adaptive interval: speed up when urgent, slow down when idle
+                has_urgent = bool(context.due_today)
+                has_any_tasks = bool(
+                    context.due_today or context.due_this_week or context.overdue
+                )
+                if has_urgent:
+                    interval = max(min_interval, base_interval // 2)
+                elif not has_any_tasks:
+                    interval = min(max_interval, base_interval * 2)
+                else:
+                    interval = base_interval
+                logger.debug("Next reasoning interval: %d seconds", interval)
         except Exception:
             logger.exception("Reasoning scheduler error")
 
 
 async def weekly_review_scheduler() -> None:
     """Send a weekly review notification every Sunday at digest_time."""
-    from deadline_agent.notifications.macos import send_notification
+    from deadline_agent.reasoning.intervention_engine import get_intervention_engine
     from deadline_agent.reasoning.weekly_review import generate_weekly_review
 
     logger.info("Weekly review scheduler started (Sundays at %s)", settings.digest_time)
@@ -145,9 +185,15 @@ async def weekly_review_scheduler() -> None:
         try:
             with SessionLocal() as session:
                 review = await generate_weekly_review(session)
-                send_notification(
+                engine = get_intervention_engine()
+                await engine.evaluate(
+                    session,
+                    task_id=None,
+                    risk_level="low",
+                    category="weekly_review",
                     title="Deadline Agent — Weekly Review",
                     body=review[:500],
+                    force=True,
                 )
                 # Persist weekly snapshot for longitudinal reasoning
                 from deadline_agent.reasoning.weekly_review import persist_weekly_snapshot
@@ -165,6 +211,59 @@ async def weekly_review_scheduler() -> None:
                         logger.exception("Identity synthesis failed")
         except Exception:
             logger.exception("Weekly review scheduler error")
+
+
+async def daily_reconstruction_scheduler() -> None:
+    """Reconstruct the day's timeline at configured time and trigger micro-confirmations."""
+    from deadline_agent.behavioral.daily_reconstruction import reconstruct_day
+    from deadline_agent.behavioral.micro_confirmations import trigger_micro_confirmations
+    from deadline_agent.reasoning.intervention_engine import get_intervention_engine
+
+    logger.info(
+        "Daily reconstruction scheduler started (daily at %s)",
+        settings.daily_reconstruction_time,
+    )
+
+    _est = ZoneInfo("America/New_York")
+
+    while True:
+        now = datetime.now(_est)
+        hour, minute = (int(x) for x in settings.daily_reconstruction_time.split(":"))
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if target <= now:
+            from datetime import timedelta
+
+            target += timedelta(days=1)
+
+        delay = (target - now).total_seconds()
+        await asyncio.sleep(delay)
+
+        if not settings.enable_daily_reconstruction:
+            continue
+        try:
+            with SessionLocal() as session:
+                rec = await reconstruct_day(session)
+                session.commit()
+
+                # Trigger micro-confirmations for low-confidence segments
+                confirmed = await trigger_micro_confirmations(session, rec)
+                if confirmed:
+                    logger.info("Triggered %d micro-confirmation(s)", confirmed)
+
+                # Notify that summary is ready
+                engine = get_intervention_engine()
+                await engine.evaluate(
+                    session,
+                    task_id=None,
+                    risk_level="low",
+                    category="daily_reconstruction",
+                    title="Day summary ready",
+                    body=rec.narrative[:200] if rec.narrative else "Your day has been reconstructed.",
+                    force=True,
+                )
+                session.commit()
+        except Exception:
+            logger.exception("Daily reconstruction scheduler error")
 
 
 async def behavioral_analysis_scheduler() -> None:
@@ -292,6 +391,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Start pipeline worker, schedulers, and file watcher on startup."""
     init_db()
 
+    # Phase 29: Intervention engine (must init before trigger engine)
+    from deadline_agent.events import event_bus as _init_bus
+    from deadline_agent.reasoning.intervention_engine import init_intervention_engine
+
+    intervention_engine = init_intervention_engine(SessionLocal)
+    intervention_engine.register(_init_bus)
+    logger.info("Intervention engine registered")
+
     # Initialize anticipatory trigger engine
     if settings.enable_anticipatory_triggers:
         from deadline_agent.events import event_bus
@@ -310,6 +417,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         asyncio.create_task(behavioral_analysis_scheduler()),
         asyncio.create_task(gmail_watch_scheduler()),
         asyncio.create_task(moodle_scheduler()),
+        asyncio.create_task(daily_reconstruction_scheduler()),
     ]
 
     # Peak window nudge + follow-up staleness schedulers
@@ -360,10 +468,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if settings.enable_session_briefing:
         from deadline_agent.awareness.session_briefing import (
             SessionBriefingGenerator,
+            SessionEndSummarizer,
         )
 
         briefing_gen = SessionBriefingGenerator(SessionLocal)
         briefing_gen.register(_event_bus)
+        end_summarizer = SessionEndSummarizer(SessionLocal)
+        end_summarizer.register(_event_bus)
 
     if settings.enable_meeting_briefing:
         from deadline_agent.awareness.meeting_briefing import (

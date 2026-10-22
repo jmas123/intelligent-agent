@@ -8,6 +8,16 @@ from pydantic import BaseModel
 EST = ZoneInfo("America/New_York")
 
 
+class CreateTaskRequest(BaseModel):
+    """Request body for manually creating a task."""
+
+    title: str
+    due_date: str | None = None  # ISO 8601 date or datetime
+    type: str = "personal"  # assignment | exam | meeting | personal | project | interview_prep
+    course: str | None = None
+    urgency: int = 3  # 1-5
+
+
 class TaskResponse(BaseModel):
     """Serialized task for API responses."""
 
@@ -20,6 +30,14 @@ class TaskResponse(BaseModel):
     urgency: str | None = None
     status: str
     affect: str | None = None  # Phase 24: enjoyment | neutral | avoidance | anxiety
+    # Phase 27: Priority ranking
+    priority_rank: int | None = None  # 1 = highest priority
+    priority_score: float | None = None  # 0.0-1.0
+    priority_action: str | None = None  # suggested next action
+    # Phase 28: Risk assessment
+    risk_level: str | None = None  # low | medium | high | critical
+    risk_pct: int | None = None  # P(miss) as 0-100
+    risk_summary: str | None = None  # human-readable risk line
 
     model_config = {"from_attributes": True}
 
@@ -468,6 +486,61 @@ class SimulateResponse(BaseModel):
     data_density: dict[str, int]
 
 
+class SimulateRequestV2(BaseModel):
+    """Request body for enhanced simulation with risk grounding."""
+
+    scenario: str
+    session_id: str | None = None
+
+
+class ScenarioRiskDeltaResponse(BaseModel):
+    """Per-task risk delta under a simulated scenario."""
+
+    task_id: int
+    task_title: str
+    course: str | None
+    p_miss_before: float
+    p_miss_after: float
+    delta: float
+    risk_level_before: str
+    risk_level_after: str
+    hours_available_before: float
+    hours_available_after: float
+
+
+class DropAnalysisResponse(BaseModel):
+    """Impact analysis for dropping a task."""
+
+    dropped_task: str
+    freed_hours: float
+    beneficiaries: list[dict[str, object]]
+    net_risk_change: float
+
+
+class ProjectedScheduleGap(BaseModel):
+    """A free window in the projected schedule."""
+
+    start: str
+    end: str
+    duration_minutes: int
+
+
+class SimulateResponseV2(BaseModel):
+    """Enhanced simulation result with grounded risk deltas."""
+
+    scenario: str
+    session_id: str
+    confidence: str
+    confidence_reason: str
+    projected_impacts: list[SimulationImpact]
+    weekly_projection: str
+    recommendation: str
+    data_density: dict[str, int]
+    risk_deltas: list[ScenarioRiskDeltaResponse]
+    projected_schedule: list[ProjectedScheduleGap]
+    drop_analysis: DropAnalysisResponse | None
+
+
 # ── Task affect schemas ─────────────────────────────────────
 
 
@@ -482,6 +555,61 @@ class TaskAffectResponse(BaseModel):
     energy_label: str | None = None  # energizing | neutral | draining
 
 
+# ── Priority ranking schemas ───────────────────────────────────────────
+
+
+class PriorityItemResponse(BaseModel):
+    """A single ranked priority for API responses."""
+
+    rank: int
+    task_id: int
+    title: str
+    course: str | None
+    type: str
+    time_label: str
+    score: float
+    risk_if_ignored: str
+    suggested_action: str
+    reasoning: str
+
+
+class PrioritiesListResponse(BaseModel):
+    """Full priority ranking payload."""
+
+    priorities: list[PriorityItemResponse]
+    computed_at: str | None = None
+
+
+# ── Risk assessment schemas ────────────────────────────────────────────
+
+
+class TaskRiskResponse(BaseModel):
+    """Risk assessment for a single task."""
+
+    task_id: int
+    title: str
+    course: str | None
+    type: str
+    time_label: str
+    probability_of_missing: float
+    probability_pct: int
+    hours_needed: float
+    hours_available: float
+    hours_worked: float
+    confidence: float
+    confidence_reason: str
+    risk_level: str  # low | medium | high | critical
+    summary: str
+
+
+class RiskListResponse(BaseModel):
+    """Full risk assessment payload."""
+
+    risks: list[TaskRiskResponse]
+    high_risk_count: int = 0
+    critical_count: int = 0
+
+
 class MeetingBriefingResponse(BaseModel):
     """Pre-meeting briefing for an upcoming calendar event."""
 
@@ -490,6 +618,150 @@ class MeetingBriefingResponse(BaseModel):
     minutes_until: int
     briefing: str
     attendee_count: int
+
+
+# ── Intervention / Brain tab schemas ────────────────────────────────
+
+
+class InterventionRecordResponse(BaseModel):
+    """A single intervention decision (fired or suppressed)."""
+
+    id: int
+    task_id: int | None
+    risk_level: str
+    intervention_tier: str
+    category: str
+    title: str
+    body: str
+    fired: bool
+    suppression_reason: str | None
+    user_acted: bool
+    created_at: str
+
+    model_config = {"from_attributes": True}
+
+
+class InterventionBudget(BaseModel):
+    """Current intervention budget usage."""
+
+    fired_today: int
+    max_per_day: int
+    quiet_hours_active: bool
+    quiet_hours_start: str
+    quiet_hours_end: str
+
+
+class InterventionTierStat(BaseModel):
+    """Effectiveness stat for a single tier."""
+
+    tier: str
+    total: int
+    acted: int
+    rate: float
+
+
+class InterventionStatsResponse(BaseModel):
+    """Aggregated intervention stats for the Brain tab."""
+
+    budget: InterventionBudget
+    effectiveness: list[InterventionTierStat]
+    escalations_pending: int
+
+
+class InterventionEscalationResponse(BaseModel):
+    """A pending escalation."""
+
+    id: int
+    task_id: int
+    current_tier: str
+    next_tier: str
+    escalate_after: str
+    created_at: str
+
+    model_config = {"from_attributes": True}
+
+
+class DailyReconstructionSegment(BaseModel):
+    """A single segment in the daily timeline."""
+
+    start_time: str
+    end_time: str
+    activity_type: str
+    task_id: int | None
+    task_title: str | None
+    description: str
+    confidence: float
+    confidence_sources: dict[str, object] | None = None
+    confirmed: bool | None
+
+
+class DailyReconstructionResponse(BaseModel):
+    """Daily reconstructed timeline."""
+
+    date: str
+    overall_confidence: float
+    user_confirmed: bool
+    narrative: str
+    segments: list[DailyReconstructionSegment]
+
+
+class MicroConfirmationResponse(BaseModel):
+    """A timeline segment needing user confirmation."""
+
+    date: str
+    segment_index: int
+    task_id: int | None
+    task_title: str | None
+    start_time: str
+    end_time: str
+    confidence: float
+    confirmed: bool | None
+
+
+class MicroConfirmationAction(BaseModel):
+    """Request body for responding to a micro-confirmation."""
+
+    date: str
+    segment_index: int
+    confirmed: bool
+
+
+class SessionBriefingPriority(BaseModel):
+    """One ranked priority in the session briefing."""
+
+    task_id: int
+    rank: int
+    title: str
+    course: str | None
+    time_label: str
+    risk_level: str
+    probability_pct: int | None
+    suggested_action: str
+    why: str
+
+
+class SessionBriefingTimeBlock(BaseModel):
+    """A recommended focus block carved out of available time."""
+
+    task_id: int | None
+    title: str
+    minutes: int
+    rationale: str
+
+
+class SessionBriefingResponse(BaseModel):
+    """On-demand session briefing — Phase 32 structured payload."""
+
+    briefing: str | None  # formatted text (back-compat)
+    generated_at: str | None = None
+    available_minutes: int = 0
+    available_label: str = ""
+    life_context: str | None = None
+    next_event: dict[str, str] | None = None
+    priorities: list[SessionBriefingPriority] = []
+    extras: list[str] = []
+    time_blocks: list[SessionBriefingTimeBlock] = []
+    recommendation: str = ""
 
 
 def _format_due(due_str: str) -> str:

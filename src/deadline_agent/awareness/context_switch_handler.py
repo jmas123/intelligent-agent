@@ -4,11 +4,6 @@ import logging
 from typing import Any
 
 from deadline_agent.events import CONTEXT_SWITCH_DETECTED, Event, EventBus
-from deadline_agent.notifications.channels import (
-    Notification,
-    NotificationPriority,
-    notification_router,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -42,14 +37,20 @@ class ContextSwitchHandler:
                     return
 
                 if summary:
-                    await notification_router.send(
-                        Notification(
-                            title=f"Switched to {to_mode}",
-                            body=summary,
-                            priority=NotificationPriority.AMBIENT,
-                            category=to_mode or "school",
-                        )
+                    from deadline_agent.reasoning.intervention_engine import (
+                        get_intervention_engine,
                     )
+
+                    engine = get_intervention_engine()
+                    await engine.evaluate(
+                        session,
+                        task_id=None,
+                        risk_level="low",
+                        category=to_mode or "school",
+                        title=f"Switched to {to_mode}",
+                        body=summary,
+                    )
+                    session.commit()
         except Exception:
             logger.exception("Context switch handler error")
 

@@ -20,11 +20,16 @@ LATE_NIGHT_DETECTED = "late_night_detected"
 FOLLOW_UP_DUE = "follow_up_due"
 CONTEXT_SWITCH_DETECTED = "context_switch_detected"
 SESSION_STARTED = "session_started"
+SESSION_ENDED = "session_ended"
 FOCUS_QUALITY_UPDATED = "focus_quality_updated"
 SLEEP_PATTERN_DETECTED = "sleep_pattern_detected"
 ABSENCE_DETECTED = "absence_detected"
 TONE_SHIFT_DETECTED = "tone_shift_detected"
 MEETING_UPCOMING = "meeting_upcoming"
+PRIORITIES_RECOMPUTED = "priorities_recomputed"
+INTERVENTION_FIRED = "intervention_fired"
+INTERVENTION_SUPPRESSED = "intervention_suppressed"
+DAILY_RECONSTRUCTION_COMPLETE = "daily_reconstruction_complete"
 
 
 @dataclass

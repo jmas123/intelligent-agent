@@ -165,7 +165,9 @@ async def generate_recruiting_report(session: Session) -> str:
     except ExtractionError:
         if settings.use_anthropic_fallback and settings.anthropic_api_key:
             try:
-                result = await _call_anthropic(RECRUITING_REPORT_PROMPT, stats_text)
+                result = await _call_anthropic(
+                    RECRUITING_REPORT_PROMPT, stats_text, model=settings.anthropic_light_model,
+                )
             except ExtractionError:
                 pass
 

@@ -9,7 +9,7 @@ let lastSimResultHtml = '';  // Preserve simulation results across dashboard ref
 
 // ─── Tab Navigation ──────────────────────────────────────
 
-const MORE_TABS = ['digest', 'patterns', 'affects', 'recruiting', 'goals', 'decisions', 'relationships', 'me'];
+const MORE_TABS = ['digest', 'patterns', 'affects', 'recruiting', 'goals', 'decisions', 'relationships', 'day', 'brain', 'me'];
 
 function switchTab(tab) {
   currentTab = tab;
@@ -62,6 +62,8 @@ function loadTab(tab) {
     case 'decisions': loadDecisions(); break;
     case 'affects': loadAffects(); break;
     case 'relationships': loadRelationships(); break;
+    case 'day': loadDay(); break;
+    case 'brain': loadBrain(); break;
     case 'me': loadMe(); break;
   }
 }
@@ -104,7 +106,8 @@ async function loadDashboard() {
     }
     html += renderLifeContextManager(ctx.life_contexts || []);
 
-    // What-if simulation prompt
+    // Quick add task + What-if simulation prompt
+    html += renderAddTaskForm();
     html += renderSimulationButton();
 
     // Ambient notification ticker
@@ -129,6 +132,19 @@ async function loadDashboard() {
     if (ctx.tasks_due_this_week && ctx.tasks_due_this_week.length > 0) {
       html += renderSection('This Week', ctx.tasks_due_this_week, 'week');
     }
+
+    // Other pending tasks (no due date or due later)
+    try {
+      const allPending = await pywebview.api.get_tasks('pending', false, false, 50);
+      const shownIds = new Set();
+      for (const list of [ctx.overdue_tasks, ctx.tasks_due_today, ctx.tasks_due_this_week]) {
+        if (list) list.forEach(t => shownIds.add(t.id));
+      }
+      const other = allPending.filter(t => !shownIds.has(t.id));
+      if (other.length > 0) {
+        html += renderSection('Other Pending', other, 'other');
+      }
+    } catch (e) { /* fallback: skip */ }
 
     // Recovery plans for overdue tasks
     if (ctx.overdue_tasks && ctx.overdue_tasks.length > 0) {
@@ -162,12 +178,27 @@ function renderSection(title, tasks, urgencyClass) {
 function renderTaskCard(task, urgencyClass) {
   const course = task.course ? `<span class="task-course">${escapeHtml(task.course)}</span>` : '';
 
-  // Due date line with countdown chip
+  // Phase 27: Priority rank badge
+  let priorityBadge = '';
+  if (task.priority_rank && task.priority_rank <= 5) {
+    priorityBadge = `<span class="priority-badge" title="Priority #${task.priority_rank}">${task.priority_rank}</span>`;
+  }
+
+  // Phase 28: Risk badge
+  let riskBadge = '';
+  let riskClass = '';
+  if (task.risk_level && task.risk_level !== 'low') {
+    const riskLabel = task.risk_pct != null ? `${task.risk_pct}%` : task.risk_level.toUpperCase();
+    riskBadge = `<span class="risk-badge risk-${task.risk_level}" title="${task.risk_summary || ''}">${riskLabel}</span>`;
+    riskClass = ` risk-${task.risk_level}`;
+  }
+
+  // Due date line with countdown chip + risk badge
   let dueLine = '';
   if (task.due) {
     const countdown = computeCountdown(task.due);
     const chipClass = countdown.urgent ? 'task-countdown urgent' : 'task-countdown';
-    dueLine = `<div class="task-due-line">${escapeHtml(task.due)}<span class="${chipClass}">${countdown.label}</span></div>`;
+    dueLine = `<div class="task-due-line">${escapeHtml(task.due)}<span class="${chipClass}">${countdown.label}</span>${riskBadge}</div>`;
   }
 
   // Phase 24: Affect badge
@@ -179,10 +210,17 @@ function renderTaskCard(task, urgencyClass) {
     affectClass = ` affect-${task.affect}`;
   }
 
+  // Phase 27: Suggested action line
+  let actionLine = '';
+  if (task.priority_action && task.priority_rank && task.priority_rank <= 3) {
+    actionLine = `<div class="task-action-hint">${escapeHtml(task.priority_action)}</div>`;
+  }
+
   return `
-    <div class="task-card urgency-${urgencyClass}${affectClass}">
-      <div class="task-title">${affectBadge}${escapeHtml(task.title)}</div>
+    <div class="task-card urgency-${urgencyClass}${affectClass}${riskClass}">
+      <div class="task-title">${priorityBadge}${affectBadge}${escapeHtml(task.title)}</div>
       ${dueLine}
+      ${actionLine}
       <div class="task-meta">${course}</div>
       <div class="task-actions">
         <button class="btn btn-done" onclick="markTask(${task.id}, 'done')">Done</button>
@@ -1303,6 +1341,332 @@ async function loadRelationships() {
   }
 }
 
+// ─── Day (Daily Reconstruction Timeline) ───────────────────────────
+
+let currentDayDate = ''; // track which date is loaded
+
+async function loadDay(date) {
+  const loading = document.getElementById('day-loading');
+  const content = document.getElementById('day-content');
+  loading.style.display = 'block';
+  content.innerHTML = '';
+
+  try {
+    const dateParam = date || '';
+    const data = await pywebview.api.get_daily_reconstruction(dateParam);
+    loading.style.display = 'none';
+    updateConnectionStatus(true);
+
+    if (data.error) {
+      content.innerHTML = '<div class="empty-state">' + escapeHtml(data.error) + '</div>';
+      return;
+    }
+
+    currentDayDate = data.date;
+    let html = '';
+
+    // Header with date nav
+    html += '<div class="day-header">' +
+      '<button class="btn btn-sm" onclick="navigateDay(-1)" title="Previous day">&#x25c0;</button>' +
+      '<span class="day-date">' + data.date + '</span>' +
+      '<button class="btn btn-sm" onclick="navigateDay(1)" title="Next day">&#x25b6;</button>' +
+      '</div>';
+
+    // Overall confidence
+    const confPct = Math.round(data.overall_confidence * 100);
+    const confColor = confPct >= 80 ? 'var(--accent-green)' : confPct >= 60 ? 'var(--accent-orange)' : 'var(--accent-red)';
+    html += '<div class="day-confidence">' +
+      '<span style="color:' + confColor + '">' + confPct + '% confidence</span>' +
+      (data.user_confirmed ? ' <span class="intervention-badge badge-acted">confirmed</span>' : '') +
+      '</div>';
+
+    // Timeline segments
+    if (data.segments && data.segments.length > 0) {
+      html += '<div class="day-timeline">';
+      const typeIcons = { work: 'W', meeting: 'M', idle: '-', email: 'E', unknown: '?' };
+      const typeColors = {
+        work: 'var(--accent-blue)',
+        meeting: 'var(--accent-purple)',
+        idle: 'var(--text-muted)',
+        email: 'var(--accent-orange)',
+        unknown: 'var(--text-muted)',
+      };
+
+      for (let i = 0; i < data.segments.length; i++) {
+        const seg = data.segments[i];
+        const icon = typeIcons[seg.activity_type] || '?';
+        const color = typeColors[seg.activity_type] || 'var(--text-muted)';
+        const segConf = Math.round(seg.confidence * 100);
+        const startT = formatTimeShort(seg.start_time);
+        const endT = formatTimeShort(seg.end_time);
+
+        // Confidence indicator
+        let confIndicator = '';
+        if (segConf < 60) confIndicator = ' <span style="color:var(--accent-red)">?</span>';
+        else if (segConf < 80) confIndicator = ' <span style="color:var(--accent-orange)">~</span>';
+
+        // Confirmed status
+        let confirmedBadge = '';
+        if (seg.confirmed === true) confirmedBadge = ' <span class="intervention-badge badge-acted">yes</span>';
+        else if (seg.confirmed === false) confirmedBadge = ' <span class="intervention-badge badge-suppressed">no</span>';
+
+        html += '<div class="day-segment" style="border-left-color:' + color + '">' +
+          '<div class="day-segment-header">' +
+            '<span class="day-segment-icon" style="color:' + color + '">' + icon + '</span>' +
+            '<span class="day-segment-time">' + startT + ' - ' + endT + '</span>' +
+            '<span class="day-segment-conf">' + segConf + '%' + confIndicator + '</span>' +
+          '</div>' +
+          '<div class="day-segment-desc">' + escapeHtml(seg.description || seg.task_title || '') + '</div>';
+
+        // Confirmation buttons for low-confidence unconfirmed work segments
+        if (seg.activity_type === 'work' && seg.confidence < 0.6 && seg.confirmed === null) {
+          html += '<div class="micro-card-actions" style="margin-top:4px">' +
+            '<button class="btn btn-approve btn-sm" onclick="respondDayConfirm(\'' + data.date + '\',' + i + ',true)">Yes</button>' +
+            '<button class="btn btn-reject btn-sm" onclick="respondDayConfirm(\'' + data.date + '\',' + i + ',false)">No</button>' +
+          '</div>';
+        }
+
+        html += confirmedBadge + '</div>';
+      }
+      html += '</div>';
+    } else {
+      html += '<div class="empty-state">No activity detected.</div>';
+    }
+
+    // Narrative
+    if (data.narrative) {
+      html += '<div class="day-narrative">' + escapeHtml(data.narrative) + '</div>';
+    }
+
+    content.innerHTML = html;
+  } catch (e) {
+    loading.style.display = 'none';
+    updateConnectionStatus(false);
+    content.innerHTML = '<div class="empty-state">Failed to load day timeline.</div>';
+  }
+}
+
+function navigateDay(offset) {
+  const d = currentDayDate ? new Date(currentDayDate + 'T12:00:00') : new Date();
+  d.setDate(d.getDate() + offset);
+  const iso = d.toISOString().slice(0, 10);
+  loadDay(iso);
+}
+
+async function respondDayConfirm(date, segmentIndex, confirmed) {
+  try {
+    await pywebview.api.respond_micro_confirmation(date, segmentIndex, confirmed);
+    loadDay(date);
+  } catch (e) {
+    // Silently fail
+  }
+}
+
+
+// ─── Brain (Intervention Engine + Micro-confirmations + Briefing) ───
+
+async function loadBrain() {
+  const loading = document.getElementById('brain-loading');
+  const content = document.getElementById('brain-content');
+  loading.style.display = 'block';
+  content.innerHTML = '';
+
+  try {
+    const [stats, interventions, escalations, confirmations] = await Promise.all([
+      pywebview.api.get_intervention_stats(),
+      pywebview.api.get_interventions(30),
+      pywebview.api.get_intervention_escalations(),
+      pywebview.api.get_micro_confirmations(''),
+    ]);
+    loading.style.display = 'none';
+    updateConnectionStatus(true);
+
+    let html = '';
+
+    // ── Section A: Session Briefing ──
+    html += '<div class="section-header">Session Briefing</div>';
+    html += '<div id="briefing-container">' +
+      '<button class="btn btn-approve" onclick="triggerSessionBriefing()">What should I do right now?</button>' +
+      '<div id="briefing-result"></div>' +
+      '</div>';
+
+    // ── Section B: Intervention Budget ──
+    if (stats && !stats.error) {
+      const b = stats.budget;
+      const pct = b.max_per_day > 0 ? Math.min(100, Math.round((b.fired_today / b.max_per_day) * 100)) : 0;
+      const budgetColor = pct >= 80 ? 'var(--accent-red)' : pct >= 50 ? 'var(--accent-orange)' : 'var(--accent-green)';
+
+      html += '<div class="section-header">Interrupt Budget</div>';
+      html += '<div class="brain-budget-card">' +
+        '<div class="brain-budget-label">' + b.fired_today + ' / ' + b.max_per_day + ' interrupts used today</div>' +
+        '<div class="brain-budget-bar-track">' +
+          '<div class="brain-budget-bar-fill" style="width:' + pct + '%;background:' + budgetColor + '"></div>' +
+        '</div>' +
+        '<div class="brain-budget-meta">' +
+          '<span>Quiet hours: ' + (b.quiet_hours_active ? '<span style="color:var(--accent-green)">active</span>' : 'off') +
+          ' (' + b.quiet_hours_start + ' - ' + b.quiet_hours_end + ')</span>' +
+        '</div>' +
+      '</div>';
+
+      // ── Section C: Effectiveness ──
+      if (stats.effectiveness && stats.effectiveness.length > 0) {
+        html += '<div class="section-header">Effectiveness <span class="section-count">30d</span></div>';
+        const tierOrder = ['silent', 'menubar', 'notification', 'voice'];
+        const tierColors = {
+          silent: 'var(--text-muted)',
+          menubar: 'var(--accent-blue)',
+          notification: 'var(--accent-orange)',
+          voice: 'var(--accent-red)',
+        };
+        const sorted = tierOrder.map(t => stats.effectiveness.find(e => e.tier === t)).filter(Boolean);
+        for (const e of sorted) {
+          const ratePct = Math.round(e.rate * 100);
+          html += '<div class="brain-tier-row">' +
+            '<span class="brain-tier-label" style="color:' + (tierColors[e.tier] || 'var(--text-secondary)') + '">' + e.tier + '</span>' +
+            '<div class="brain-tier-bar-track">' +
+              '<div class="brain-tier-bar-fill" style="width:' + ratePct + '%;background:' + (tierColors[e.tier] || 'var(--text-muted)') + '"></div>' +
+            '</div>' +
+            '<span class="brain-tier-stat">' + ratePct + '% (' + e.acted + '/' + e.total + ')</span>' +
+          '</div>';
+        }
+      }
+
+      // ── Section D: Pending Escalations ──
+      if (stats.escalations_pending > 0 && escalations && escalations.length > 0) {
+        html += '<div class="section-header">Pending Escalations <span class="section-count">' + escalations.length + '</span></div>';
+        for (const esc of escalations) {
+          const escTime = formatRelativeTime(esc.escalate_after);
+          html += '<div class="escalation-card">' +
+            '<div class="escalation-tiers">' +
+              '<span class="intervention-badge badge-' + esc.current_tier + '">' + esc.current_tier + '</span>' +
+              ' <span style="color:var(--text-muted)">&#x2192;</span> ' +
+              '<span class="intervention-badge badge-' + esc.next_tier + '">' + esc.next_tier + '</span>' +
+            '</div>' +
+            '<div style="color:var(--text-muted);font-size:11px">Task #' + esc.task_id + ' &middot; ' + escTime + '</div>' +
+          '</div>';
+        }
+      }
+    }
+
+    // ── Section E: Micro-Confirmations ──
+    html += '<div class="section-header">Micro-Confirmations' +
+      (confirmations && confirmations.length > 0 ? ' <span class="section-count">' + confirmations.length + '</span>' : '') +
+      '</div>';
+    if (!confirmations || confirmations.length === 0) {
+      html += '<div class="empty-state" style="padding:8px 0;font-size:12px;color:var(--text-muted)">No confirmations needed.</div>';
+    } else {
+      for (const mc of confirmations) {
+        const startT = formatTimeShort(mc.start_time);
+        const endT = formatTimeShort(mc.end_time);
+        const confPct = Math.round(mc.confidence * 100);
+        html += '<div class="micro-card">' +
+          '<div class="micro-card-header">' +
+            '<span class="micro-card-title">' + (mc.task_title || 'Unknown task') + '</span>' +
+            '<span class="micro-card-conf" title="Confidence">' + confPct + '%</span>' +
+          '</div>' +
+          '<div class="micro-card-time">' + startT + ' - ' + endT + '</div>' +
+          '<div class="micro-card-actions">' +
+            '<button class="btn btn-approve btn-sm" onclick="respondMicroConfirmation(\'' + mc.date + '\',' + mc.segment_index + ',true)">Yes</button>' +
+            '<button class="btn btn-reject btn-sm" onclick="respondMicroConfirmation(\'' + mc.date + '\',' + mc.segment_index + ',false)">No</button>' +
+          '</div>' +
+        '</div>';
+      }
+    }
+
+    // ── Section F: Recent Interventions ──
+    if (interventions && interventions.length > 0 && !interventions.error) {
+      html += '<div class="section-header">Recent Interventions <span class="section-count">' + interventions.length + '</span></div>';
+      for (const r of interventions) {
+        const timeAgo = formatRelativeTime(r.created_at);
+        const tierColors = {
+          silent: 'var(--text-muted)',
+          menubar: 'var(--accent-blue)',
+          notification: 'var(--accent-orange)',
+          voice: 'var(--accent-red)',
+        };
+        const borderColor = tierColors[r.intervention_tier] || 'var(--text-muted)';
+        const firedBadge = r.fired
+          ? '<span class="intervention-badge badge-fired">fired</span>'
+          : '<span class="intervention-badge badge-suppressed">' + (r.suppression_reason || 'suppressed') + '</span>';
+        const actedBadge = r.fired && r.user_acted
+          ? ' <span class="intervention-badge badge-acted">acted</span>'
+          : '';
+
+        html += '<div class="intervention-card" style="border-left-color:' + borderColor + '">' +
+          '<div class="intervention-card-header">' +
+            '<span class="intervention-card-title">' + escapeHtml(r.title) + '</span>' +
+            '<span class="intervention-card-time">' + timeAgo + '</span>' +
+          '</div>' +
+          '<div class="intervention-card-body">' + escapeHtml(r.body) + '</div>' +
+          '<div class="intervention-card-meta">' +
+            '<span class="intervention-badge badge-' + r.intervention_tier + '">' + r.intervention_tier + '</span> ' +
+            firedBadge + actedBadge +
+          '</div>' +
+        '</div>';
+      }
+    }
+
+    content.innerHTML = html;
+  } catch (e) {
+    loading.style.display = 'none';
+    updateConnectionStatus(false);
+    content.innerHTML = '<div class="empty-state">Failed to load brain state.</div>';
+  }
+}
+
+async function triggerSessionBriefing() {
+  const container = document.getElementById('briefing-result');
+  container.innerHTML = '<div class="loading" style="display:block;padding:8px 0">Generating briefing...</div>';
+  try {
+    const data = await pywebview.api.get_session_briefing();
+    if (data && data.briefing) {
+      container.innerHTML = '<div class="briefing-box">' + escapeHtml(data.briefing) + '</div>';
+    } else {
+      container.innerHTML = '<div class="briefing-box" style="color:var(--text-muted)">No briefing available — not enough data yet.</div>';
+    }
+  } catch (e) {
+    container.innerHTML = '<div class="briefing-box" style="color:var(--accent-red)">Failed to generate briefing.</div>';
+  }
+}
+
+async function respondMicroConfirmation(date, segmentIndex, confirmed) {
+  try {
+    await pywebview.api.respond_micro_confirmation(date, segmentIndex, confirmed);
+    // Reload just the micro-confirmations section
+    loadBrain();
+  } catch (e) {
+    // Silently fail — will reload on next refresh
+  }
+}
+
+function formatRelativeTime(isoStr) {
+  if (!isoStr) return '';
+  try {
+    const dt = new Date(isoStr);
+    const now = new Date();
+    const diffMs = now - dt;
+    const diffMin = Math.floor(diffMs / 60000);
+    if (diffMin < 1) return 'just now';
+    if (diffMin < 60) return diffMin + 'm ago';
+    const diffHr = Math.floor(diffMin / 60);
+    if (diffHr < 24) return diffHr + 'h ago';
+    const diffDays = Math.floor(diffHr / 24);
+    return diffDays + 'd ago';
+  } catch (e) {
+    return isoStr;
+  }
+}
+
+function formatTimeShort(isoStr) {
+  if (!isoStr) return '';
+  try {
+    const dt = new Date(isoStr);
+    return dt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+  } catch (e) {
+    return isoStr;
+  }
+}
+
 // ─── Me (Identity + Knowledge Graph) ───────────────────
 
 async function loadMe() {
@@ -1376,6 +1740,74 @@ async function resynthesizeIdentity() {
 
 // ─── Simulation ─────────────────────────────────────────
 
+function renderAddTaskForm() {
+  return `<div class="add-task-section">
+    <div class="section-header" style="cursor:pointer" onclick="toggleAddTask()">
+      + Add Task <span id="add-task-toggle" style="font-size:10px;color:var(--text-muted)">&#x25bc;</span>
+    </div>
+    <div id="add-task-form" style="display:none">
+      <input type="text" id="add-task-title" class="form-input" placeholder="Task title">
+      <div style="display:flex;gap:6px;margin-top:4px">
+        <input type="text" id="add-task-due" class="form-input" placeholder="Due: YYYY-MM-DD" style="flex:1">
+        <select id="add-task-type" class="form-input" style="flex:1">
+          <option value="personal">Personal</option>
+          <option value="project">Project</option>
+          <option value="assignment">Assignment</option>
+          <option value="exam">Exam</option>
+          <option value="meeting">Meeting</option>
+          <option value="interview_prep">Interview Prep</option>
+        </select>
+      </div>
+      <div style="display:flex;gap:6px;margin-top:4px">
+        <input type="text" id="add-task-course" class="form-input" placeholder="Course / project (optional)" style="flex:1">
+        <button class="btn btn-approve" onclick="submitAddTask()">Add</button>
+      </div>
+      <div id="add-task-result" style="font-size:11px;margin-top:4px"></div>
+    </div>
+  </div>`;
+}
+
+function toggleAddTask() {
+  const form = document.getElementById('add-task-form');
+  const toggle = document.getElementById('add-task-toggle');
+  if (form.style.display === 'none') {
+    form.style.display = 'block';
+    toggle.innerHTML = '&#x25b2;';
+  } else {
+    form.style.display = 'none';
+    toggle.innerHTML = '&#x25bc;';
+  }
+}
+
+async function submitAddTask() {
+  const title = document.getElementById('add-task-title').value.trim();
+  const due = document.getElementById('add-task-due').value;
+  const type = document.getElementById('add-task-type').value;
+  const course = document.getElementById('add-task-course').value.trim();
+  const resultDiv = document.getElementById('add-task-result');
+
+  if (!title) {
+    resultDiv.innerHTML = '<span style="color:var(--accent-red)">Title is required</span>';
+    return;
+  }
+
+  resultDiv.innerHTML = '<span style="color:var(--text-muted)">Adding...</span>';
+
+  try {
+    const result = await pywebview.api.create_task(title, due || '', type, course, 3);
+    if (result.error) {
+      resultDiv.innerHTML = '<span style="color:var(--accent-red)">' + escapeHtml(result.error) + '</span>';
+    } else {
+      resultDiv.innerHTML = '<span style="color:var(--accent-green)">Added: ' + escapeHtml(result.title) + '</span>';
+      document.getElementById('add-task-title').value = '';
+      document.getElementById('add-task-due').value = '';
+      document.getElementById('add-task-course').value = '';
+    }
+  } catch (e) {
+    resultDiv.innerHTML = '<span style="color:var(--accent-red)">Failed to add task</span>';
+  }
+}
+
 function renderSimulationButton() {
   return `<div class="sim-prompt" style="margin-bottom:10px">
     <div class="section-header">What if...</div>
@@ -1387,6 +1819,8 @@ function renderSimulationButton() {
   </div>`;
 }
 
+let simSessionId = '';  // for conversational follow-up
+
 async function runSimulation() {
   const input = document.getElementById('sim-input');
   const resultDiv = document.getElementById('sim-result');
@@ -1396,12 +1830,15 @@ async function runSimulation() {
   resultDiv.innerHTML = '<div class="loading" style="padding:10px">Running simulation...</div>';
 
   try {
-    const result = await pywebview.api.run_simulation(scenario);
+    const result = await pywebview.api.run_simulation_v2(scenario, simSessionId);
 
     if (result.error) {
       resultDiv.innerHTML = `<div class="empty-state">${escapeHtml(result.error)}</div>`;
       return;
     }
+
+    // Track session for follow-up
+    simSessionId = result.session_id || '';
 
     const confColors = { high: 'var(--accent-green)', medium: 'var(--accent-orange)', low: 'var(--accent-red)' };
     const sevColors = { positive: 'var(--accent-green)', neutral: 'var(--text-muted)', concerning: 'var(--accent-orange)', critical: 'var(--accent-red)' };
@@ -1409,6 +1846,44 @@ async function runSimulation() {
     let html = `<div class="sim-result-card">`;
     html += `<div class="sim-confidence" style="color:${confColors[result.confidence] || 'var(--text-muted)'}">
       ${escapeHtml(result.confidence)} confidence — ${escapeHtml(result.confidence_reason)}</div>`;
+
+    // Risk deltas table (Phase 31)
+    if (result.risk_deltas && result.risk_deltas.length > 0) {
+      const significant = result.risk_deltas.filter(d => Math.abs(d.delta) >= 0.01);
+      if (significant.length > 0) {
+        html += '<div class="sim-deltas">';
+        html += '<div class="section-header" style="margin-top:8px">Risk Impact</div>';
+        for (const d of significant) {
+          const sign = d.delta > 0 ? '+' : '';
+          const deltaColor = d.delta > 0 ? 'var(--accent-red)' : d.delta < 0 ? 'var(--accent-green)' : 'var(--text-muted)';
+          const arrow = d.delta > 0 ? '&#x25b2;' : '&#x25bc;';
+          const course = d.course ? ' (' + escapeHtml(d.course) + ')' : '';
+          html += `<div class="sim-delta-row">
+            <span class="sim-delta-task">${escapeHtml(d.task_title)}${course}</span>
+            <span class="sim-delta-values">
+              ${Math.round(d.p_miss_before * 100)}% <span style="color:var(--text-muted)">&#x2192;</span> ${Math.round(d.p_miss_after * 100)}%
+              <span class="sim-delta-change" style="color:${deltaColor}">${arrow} ${sign}${Math.round(d.delta * 100)}%</span>
+            </span>
+          </div>`;
+        }
+        html += '</div>';
+      }
+    }
+
+    // Drop analysis (Phase 31)
+    if (result.drop_analysis) {
+      const da = result.drop_analysis;
+      html += '<div class="sim-drop-analysis">';
+      html += `<div class="section-header" style="margin-top:8px">Drop Analysis</div>`;
+      html += `<div class="sim-drop-detail">Dropped: <strong>${escapeHtml(da.dropped_task)}</strong></div>`;
+      html += `<div class="sim-drop-detail">Freed: ${da.freed_hours.toFixed(1)}h &middot; Net risk: <span style="color:${da.net_risk_change <= 0 ? 'var(--accent-green)' : 'var(--accent-red)'}">${da.net_risk_change > 0 ? '+' : ''}${Math.round(da.net_risk_change * 100)}%</span></div>`;
+      if (da.beneficiaries && da.beneficiaries.length > 0) {
+        for (const b of da.beneficiaries) {
+          html += `<div class="sim-drop-benefit">&#x2193; ${escapeHtml(b.task_title)} (${Math.round(b.delta * 100)}%)</div>`;
+        }
+      }
+      html += '</div>';
+    }
 
     if (result.projected_impacts && result.projected_impacts.length > 0) {
       html += '<div class="sim-impacts">';
@@ -1422,17 +1897,23 @@ async function runSimulation() {
       html += '</div>';
     }
 
+    if (result.recommendation) {
+      html += `<div class="sim-recommendation">${renderMarkdown(result.recommendation)}</div>`;
+    }
+
     if (result.weekly_projection) {
       html += `<div class="sim-projection">${renderMarkdown(result.weekly_projection)}</div>`;
     }
 
-    if (result.recommendation) {
-      html += `<div class="sim-recommendation">${renderMarkdown(result.recommendation)}</div>`;
+    // Follow-up hint
+    if (simSessionId) {
+      html += `<div style="font-size:10px;color:var(--text-muted);margin-top:6px">Session active — type another scenario to follow up</div>`;
     }
 
     html += '</div>';
     resultDiv.innerHTML = html;
     lastSimResultHtml = html;
+    if (input) input.value = '';
   } catch (e) {
     resultDiv.innerHTML = '<div class="empty-state">Simulation failed.</div>';
   }

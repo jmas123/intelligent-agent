@@ -8,7 +8,6 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from deadline_agent.models import Task
-from deadline_agent.notifications.macos import send_notification
 
 logger = logging.getLogger(__name__)
 
@@ -31,12 +30,16 @@ def _hours_until(due: datetime) -> float:
     return delta.total_seconds() / 3600
 
 
-def check_and_send_alerts(session: Session) -> int:
-    """Check pending tasks and send pre-deadline alerts.
+async def check_and_send_alerts(session: Session) -> int:
+    """Check pending tasks and send pre-deadline alerts via intervention engine.
 
     Sends 24h alert when task is <=24h away, 2h alert when <=2h away.
     Returns the number of alerts sent.
     """
+    from deadline_agent.reasoning.intervention_engine import get_intervention_engine
+
+    engine = get_intervention_engine()
+
     stmt = (
         select(Task)
         .where(Task.status == "pending")
@@ -62,10 +65,14 @@ def check_and_send_alerts(session: Session) -> int:
 
         # 2h alert (higher urgency)
         if hours <= 2 and not task.alert_2h_sent:
-            send_notification(
+            body = f"{task.title}" + (f" ({task.course})" if task.course else "")
+            await engine.evaluate(
+                session,
+                task_id=task.id,
+                risk_level="high",
+                category="alert_2h",
                 title="Deadline in 2 hours!",
-                body=f"{task.title}" + (f" ({task.course})" if task.course else ""),
-                subtitle=due_est,
+                body=f"{body} — {due_est}",
             )
             task.alert_2h_sent = True
             task.alert_24h_sent = True  # Don't send 24h alert if 2h was sent first
@@ -74,10 +81,14 @@ def check_and_send_alerts(session: Session) -> int:
 
         # 24h alert
         elif hours <= 24 and not task.alert_24h_sent:
-            send_notification(
+            body = f"{task.title}" + (f" ({task.course})" if task.course else "")
+            await engine.evaluate(
+                session,
+                task_id=task.id,
+                risk_level="medium",
+                category="alert_24h",
                 title="Deadline tomorrow",
-                body=f"{task.title}" + (f" ({task.course})" if task.course else ""),
-                subtitle=due_est,
+                body=f"{body} — {due_est}",
             )
             task.alert_24h_sent = True
             alerts_sent += 1

@@ -86,6 +86,7 @@ async def process_file_events(session_factory: Any, event_queue: asyncio.Queue[F
                     from deadline_agent.events import (
                         CONTEXT_SWITCH_DETECTED,
                         FILE_ACTIVITY_RECORDED,
+                        SESSION_ENDED,
                         SESSION_STARTED,
                         Event,
                         event_bus,
@@ -102,9 +103,19 @@ async def process_file_events(session_factory: Any, event_queue: asyncio.Queue[F
 
                     from deadline_agent.awareness.ambient_state import ambient_state
 
-                    session_started, prev_mode = ambient_state.record_activity(
-                        track, event.timestamp
+                    session_started, prev_mode, ended_session_start = (
+                        ambient_state.record_activity(track, event.timestamp)
                     )
+
+                    if ended_session_start is not None:
+                        await event_bus.emit(Event(
+                            type=SESSION_ENDED,
+                            payload={
+                                "session_started_at": ended_session_start.isoformat(),
+                                "session_ended_at": event.timestamp.isoformat(),
+                                "life_track": ambient_state.last_life_track,
+                            },
+                        ))
 
                     if session_started:
                         await event_bus.emit(Event(

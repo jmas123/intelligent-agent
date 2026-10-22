@@ -39,8 +39,10 @@ class TTLCache:
 
 
 # Shared cache instances
-digest_cache = TTLCache(default_ttl_seconds=1800)  # 30 min
-weekly_review_cache = TTLCache(default_ttl_seconds=3600)  # 60 min
+# TTLs aligned to reasoning_interval_minutes (default 120min) and weekly cadence
+# to avoid redundant LLM calls when state hasn't changed.
+digest_cache = TTLCache(default_ttl_seconds=7200)  # 2 hours
+weekly_review_cache = TTLCache(default_ttl_seconds=43200)  # 12 hours
 
 
 def snapshot_hash(prompt_text: str) -> str:

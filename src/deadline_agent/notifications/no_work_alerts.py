@@ -8,18 +8,20 @@ from sqlalchemy.orm import Session
 from deadline_agent.config import settings
 from deadline_agent.models import Task
 from deadline_agent.notifications.alerts import _hours_until, _parse_due_date
-from deadline_agent.notifications.macos import send_notification
 from deadline_agent.store.file_repository import FileActivityRepository
 
 logger = logging.getLogger(__name__)
 
 
-def check_no_work_alerts(session: Session) -> int:
+async def check_no_work_alerts(session: Session) -> int:
     """Send alerts for tasks approaching deadlines with no linked file activity.
 
-    Checks pending tasks due within `no_work_alert_hours` that have no
-    file activity linked to them. Returns the number of alerts sent.
+    Routes through intervention engine. Returns the number of alerts sent.
     """
+    from deadline_agent.reasoning.intervention_engine import get_intervention_engine
+
+    engine = get_intervention_engine()
+
     stmt = (
         select(Task)
         .where(Task.status == "pending")
@@ -46,12 +48,15 @@ def check_no_work_alerts(session: Session) -> int:
         if file_repo.has_activity_for_task(task.id, since_hours=settings.no_work_alert_hours):
             continue
 
-        # No work detected — send alert
+        # No work detected — route through intervention engine
         course_str = f" ({task.course})" if task.course else ""
-        send_notification(
+        await engine.evaluate(
+            session,
+            task_id=task.id,
+            risk_level="medium",
+            category="no_work",
             title="No work detected",
             body=f"{task.title}{course_str} is due in {int(hours)}h — no matching files found",
-            subtitle="Consider starting now",
         )
         task.no_work_alert_sent = True
         alerts_sent += 1

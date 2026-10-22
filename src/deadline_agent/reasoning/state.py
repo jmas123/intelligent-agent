@@ -39,6 +39,8 @@ def _format_pattern(p: BehavioralPattern) -> str:
         rank = data.get("rank", "secondary")
         if rank == "primary":
             return f"Your most productive window is {label} ({count} file edits)"
+        if count < 10:
+            return ""  # Too few edits to be a meaningful pattern
         return f"You're also active {label} ({count} file edits)"
 
     if p.pattern_type == "lead_time":
@@ -148,8 +150,10 @@ def _format_pattern(p: BehavioralPattern) -> str:
         return f"Applications sent in {bucket}: {rate:.0%} response rate ({total} sent)"
 
     if p.pattern_type == "recruiting_fit_score":
-        company = data.get("company", p.pattern_key)
         score = data.get("score", 0)
+        if score < 0.1:
+            return ""  # Don't surface dead/near-zero fit scores
+        company = data.get("company", p.pattern_key)
         rank = data.get("rank", "?")
         factors = data.get("matching_factors", [])
         factors_str = f" ({', '.join(factors)})" if factors else ""
@@ -233,20 +237,58 @@ class StateSnapshot:
     task_affect_context: list[str] = field(default_factory=list)
     # Phase 25: Recruiting analytics
     recruiting_analytics: list[str] = field(default_factory=list)
+    # Phase 27: Priority rankings
+    priority_context: list[str] = field(default_factory=list)
+    # Phase 28: Risk assessments
+    risk_context: list[str] = field(default_factory=list)
 
-    def to_prompt(self) -> str:
-        """Format snapshot as structured text for LLM input."""
+    # Section names for to_prompt() filtering
+    SECTION_IDENTITY = "identity"
+    SECTION_TASKS = "tasks"
+    SECTION_CALENDAR = "calendar"
+    SECTION_FILE_ACTIVITY = "file_activity"
+    SECTION_LIFE_CONTEXT = "life_context"
+    SECTION_PATTERNS = "patterns"
+    SECTION_HEALTH = "health"
+    SECTION_GOALS = "goals"
+    SECTION_DECISIONS = "decisions"
+    SECTION_RELATIONSHIPS = "relationships"
+    SECTION_AFFECT = "affect"
+    SECTION_RECRUITING = "recruiting"
+    SECTION_CAUSAL = "causal"
+    SECTION_HISTORY = "history"
+    SECTION_SPIKES = "spikes"
+    SECTION_PRIORITIES = "priorities"
+    SECTION_RISK = "risk"
+
+    # Presets for common call types
+    SECTIONS_DIGEST = {
+        "identity", "tasks", "calendar", "life_context", "patterns",
+        "health", "spikes", "priorities", "risk",
+    }
+    SECTIONS_ALL: set[str] | None = None  # None = include everything
+
+    def to_prompt(self, sections: set[str] | None = None) -> str:
+        """Format snapshot as structured text for LLM input.
+
+        Args:
+            sections: If provided, only include the named sections.
+                      None (default) includes all sections.
+        """
         local_now = self.now.astimezone(USER_TZ)
         lines: list[str] = [f"Current time: {local_now.strftime('%A, %B %d %Y %I:%M %p %Z')}"]
         lines.append(f"Tasks: {self.total_pending} pending, {self.total_done} completed")
         lines.append("")
 
-        if self.identity_context:
+        def _include(section: str) -> bool:
+            return sections is None or section in sections
+
+        if self.identity_context and _include("identity"):
             lines.append("ABOUT YOU (durable identity):")
             lines.append(self.identity_context)
             lines.append("")
 
-        if self.overdue:
+        if self.overdue and _include("tasks"):
             lines.append(f"OVERDUE ({len(self.overdue)}):")
             for t in self.overdue:
                 course = f" ({t.course})" if t.course else ""
@@ -254,14 +296,14 @@ class StateSnapshot:
                 lines.append(f"  - {t.title}{course} [was due {day}]")
             lines.append("")
 
-        if self.due_today:
+        if self.due_today and _include("tasks"):
             lines.append(f"DUE TODAY ({len(self.due_today)}):")
             for t in self.due_today:
                 course = f" ({t.course})" if t.course else ""
                 lines.append(f"  - {t.title}{course} [urgency: {t.urgency_score}/5]")
             lines.append("")
 
-        if self.due_this_week:
+        if self.due_this_week and _include("tasks"):
             lines.append(f"DUE THIS WEEK ({len(self.due_this_week)}):")
             for t in self.due_this_week:
                 course = f" ({t.course})" if t.course else ""
@@ -269,7 +311,7 @@ class StateSnapshot:
                 lines.append(f"  - {t.title}{course} [{day}, urgency: {t.urgency_score}/5]")
             lines.append("")
 
-        if self.unworked_deadlines:
+        if self.unworked_deadlines and _include("tasks"):
             lines.append(f"NO WORK DETECTED ({len(self.unworked_deadlines)}):")
             for t in self.unworked_deadlines:
                 course = f" ({t.course})" if t.course else ""
@@ -277,7 +319,7 @@ class StateSnapshot:
                 lines.append(f"  - {t.title}{course} [due {day}, no matching files found]")
             lines.append("")
 
-        if self.calendar_events:
+        if self.calendar_events and _include("calendar"):
             lines.append(f"CALENDAR EVENTS ({len(self.calendar_events)}):")
             for ev in self.calendar_events:
                 start_str = ev.get("start", "")
@@ -308,14 +350,14 @@ class StateSnapshot:
                 lines.append(f"  - {time_range}: {summary}{loc}{att}")
             lines.append("")
 
-        if self.recent_file_activity:
+        if self.recent_file_activity and _include("file_activity"):
             lines.append(f"RECENT FILE ACTIVITY ({len(self.recent_file_activity)}):")
             for a in self.recent_file_activity[:10]:
                 lines.append(f"  - {a.filename} ({a.event_type}, {a.directory})")
             if len(self.recent_file_activity) > 10:
                 lines.append(f"  ...and {len(self.recent_file_activity) - 10} more")
 
-        if self.life_contexts:
+        if self.life_contexts and _include("life_context"):
             lines.append("")
             lines.append(f"ACTIVE LIFE CONTEXT ({len(self.life_contexts)}):")
             for ctx in self.life_contexts:
@@ -326,7 +368,7 @@ class StateSnapshot:
                     f"{ctx.start_date} to {ctx.end_date}{source_tag}"
                 )
 
-        if self.behavioral_patterns:
+        if self.behavioral_patterns and _include("patterns"):
             lines.append("")
             lines.append(f"BEHAVIORAL PATTERNS ({len(self.behavioral_patterns)} learned):")
             for p in self.behavioral_patterns:
@@ -334,7 +376,7 @@ class StateSnapshot:
                 if desc:
                     lines.append(f"  - {desc}")
 
-        if self.health_signals or self.absence_signals:
+        if (self.health_signals or self.absence_signals) and _include("health"):
             lines.append("")
             lines.append("HEALTH SIGNALS:")
             ln = self.health_signals.get("late_night_days", 0)
@@ -368,37 +410,49 @@ class StateSnapshot:
             for signal in self.absence_signals:
                 lines.append(f"  - {signal}")
 
-        if self.goal_gaps:
+        if self.goal_gaps and _include("goals"):
             lines.append("")
             lines.append(f"INTENTION vs BEHAVIOR ({len(self.goal_gaps)}):")
             for gap in self.goal_gaps:
                 lines.append(f"  - {gap}")
 
-        if self.recent_decisions:
+        if self.recent_decisions and _include("decisions"):
             lines.append("")
             lines.append(f"DECISION HISTORY ({len(self.recent_decisions)}):")
             for d in self.recent_decisions:
                 lines.append(f"  - {d}")
 
-        if self.relationship_alerts:
+        if self.relationship_alerts and _include("relationships"):
             lines.append("")
             lines.append(f"RELATIONSHIP SIGNALS ({len(self.relationship_alerts)}):")
             for alert in self.relationship_alerts:
                 lines.append(f"  - {alert}")
 
-        if self.task_affect_context:
+        if self.task_affect_context and _include("affect"):
             lines.append("")
             lines.append(f"TASK AFFECT ({len(self.task_affect_context)}):")
             for ctx in self.task_affect_context:
                 lines.append(f"  - {ctx}")
 
-        if self.recruiting_analytics:
+        if self.recruiting_analytics and _include("recruiting"):
             lines.append("")
             lines.append(f"RECRUITING ANALYTICS ({len(self.recruiting_analytics)}):")
             for ra in self.recruiting_analytics:
                 lines.append(f"  - {ra}")
 
-        if self.stale_applications:
+        if self.priority_context and _include("priorities"):
+            lines.append("")
+            lines.append(f"PRIORITY RANKING ({len(self.priority_context)}):")
+            for ctx in self.priority_context:
+                lines.append(f"  - {ctx}")
+
+        if self.risk_context and _include("risk"):
+            lines.append("")
+            lines.append(f"RISK ASSESSMENT ({len(self.risk_context)}):")
+            for ctx in self.risk_context:
+                lines.append(f"  - {ctx}")
+
+        if self.stale_applications and _include("recruiting"):
             lines.append("")
             lines.append(
                 f"STALE APPLICATIONS ({len(self.stale_applications)} "
@@ -411,29 +465,29 @@ class StateSnapshot:
                 )
 
         # Phase 15: Genuine reasoning sections
-        if self.causal_statements:
+        if self.causal_statements and _include("causal"):
             lines.append("")
             lines.append("CAUSAL ANALYSIS:")
             for stmt in self.causal_statements:
                 lines.append(f"  - {stmt}")
 
-        if self.tradeoff_statements:
+        if self.tradeoff_statements and _include("causal"):
             lines.append("")
             lines.append("PRIORITY TRADEOFFS:")
             for stmt in self.tradeoff_statements:
                 lines.append(f"  - {stmt}")
 
-        if self.compressed_history:
+        if self.compressed_history and _include("history"):
             lines.append("")
             lines.append("RECENT WEEKS (compressed history):")
             lines.append(self.compressed_history)
 
-        if self.longitudinal_context:
+        if self.longitudinal_context and _include("history"):
             lines.append("")
             lines.append("CROSS-SEMESTER PATTERNS:")
             lines.append(self.longitudinal_context)
 
-        if self.spike_predictions:
+        if self.spike_predictions and _include("spikes"):
             lines.append("")
             lines.append("WORKLOAD SPIKE PREDICTIONS:")
             for pred in self.spike_predictions:
@@ -450,9 +504,9 @@ class UnifiedContext(StateSnapshot):
     weekly_stats: dict[str, object] = field(default_factory=dict)
     completed_this_week: list[Task] = field(default_factory=list)
 
-    def to_prompt(self) -> str:
+    def to_prompt(self, sections: set[str] | None = None) -> str:
         """Format full context including calendar and weekly data."""
-        base = super().to_prompt()
+        base = super().to_prompt(sections=sections)
         lines = [base]
 
         if self.calendar_gaps:
@@ -858,6 +912,35 @@ def build_state_snapshot(session: Session) -> StateSnapshot:
     except Exception:
         pass
 
+    # Phase 27: Priority rankings
+    priority_context: list[str] = []
+    try:
+        from deadline_agent.reasoning.priority_engine import get_current_priorities
+
+        priorities = get_current_priorities(session, limit=5)
+        for p in priorities:
+            course = f" ({p['course']})" if p.get("course") else ""
+            priority_context.append(
+                f"#{p['rank']} {p['title']}{course} — {p['time_label']} — {p['reasoning']}"
+            )
+    except Exception:
+        pass
+
+    # Phase 28: Risk assessments
+    risk_context: list[str] = []
+    try:
+        from deadline_agent.reasoning.risk_engine import get_current_risks
+
+        risks_data = get_current_risks(session)
+        for r in risks_data:
+            if r["risk_level"] in ("high", "critical"):
+                course = f" ({r['course']})" if r.get("course") else ""
+                risk_context.append(
+                    f"{r['title']}{course}: {r['summary']}"
+                )
+    except Exception:
+        pass
+
     return StateSnapshot(
         now=now,
         due_today=due_today,
@@ -883,4 +966,6 @@ def build_state_snapshot(session: Session) -> StateSnapshot:
         relationship_alerts=relationship_alerts,
         task_affect_context=task_affect_context,
         recruiting_analytics=recruiting_analytics,
+        priority_context=priority_context,
+        risk_context=risk_context,
     )

@@ -1,8 +1,9 @@
 """Tests for no-work-detected alerts."""
 
 from datetime import UTC, datetime, timedelta
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
+import pytest
 from sqlalchemy.orm import Session
 
 from deadline_agent.models import FileActivity, FileTaskLink, Task
@@ -50,70 +51,92 @@ def _add_linked_activity(session: Session, task: Task) -> None:
     session.flush()
 
 
-@patch("deadline_agent.notifications.no_work_alerts.send_notification", return_value=True)
-def test_alerts_for_task_with_no_work(mock_notify: object, session: Session) -> None:
+def _mock_engine():
+    engine = AsyncMock()
+    engine.evaluate = AsyncMock()
+    return engine
+
+
+@pytest.mark.asyncio
+@patch("deadline_agent.reasoning.intervention_engine.get_intervention_engine")
+async def test_alerts_for_task_with_no_work(mock_get_engine: object, session: Session) -> None:
+    mock_get_engine.return_value = _mock_engine()
     _add_task(session, hours_until_due=48)
 
-    count = check_no_work_alerts(session)
+    count = await check_no_work_alerts(session)
     assert count == 1
 
 
-@patch("deadline_agent.notifications.no_work_alerts.send_notification", return_value=True)
-def test_no_alert_when_work_exists(mock_notify: object, session: Session) -> None:
+@pytest.mark.asyncio
+@patch("deadline_agent.reasoning.intervention_engine.get_intervention_engine")
+async def test_no_alert_when_work_exists(mock_get_engine: object, session: Session) -> None:
+    mock_get_engine.return_value = _mock_engine()
     task = _add_task(session, hours_until_due=48)
     _add_linked_activity(session, task)
 
-    count = check_no_work_alerts(session)
+    count = await check_no_work_alerts(session)
     assert count == 0
 
 
-@patch("deadline_agent.notifications.no_work_alerts.send_notification", return_value=True)
-def test_no_alert_when_already_sent(mock_notify: object, session: Session) -> None:
+@pytest.mark.asyncio
+@patch("deadline_agent.reasoning.intervention_engine.get_intervention_engine")
+async def test_no_alert_when_already_sent(mock_get_engine: object, session: Session) -> None:
+    mock_get_engine.return_value = _mock_engine()
     _add_task(session, hours_until_due=48, no_work_alert_sent=True, raw_hash="sent1")
 
-    count = check_no_work_alerts(session)
+    count = await check_no_work_alerts(session)
     assert count == 0
 
 
-@patch("deadline_agent.notifications.no_work_alerts.send_notification", return_value=True)
-def test_no_alert_for_done_tasks(mock_notify: object, session: Session) -> None:
+@pytest.mark.asyncio
+@patch("deadline_agent.reasoning.intervention_engine.get_intervention_engine")
+async def test_no_alert_for_done_tasks(mock_get_engine: object, session: Session) -> None:
+    mock_get_engine.return_value = _mock_engine()
     _add_task(session, hours_until_due=48, status="done", raw_hash="done1")
 
-    count = check_no_work_alerts(session)
+    count = await check_no_work_alerts(session)
     assert count == 0
 
 
-@patch("deadline_agent.notifications.no_work_alerts.send_notification", return_value=True)
-def test_no_alert_for_far_future_tasks(mock_notify: object, session: Session) -> None:
+@pytest.mark.asyncio
+@patch("deadline_agent.reasoning.intervention_engine.get_intervention_engine")
+async def test_no_alert_for_far_future_tasks(mock_get_engine: object, session: Session) -> None:
+    mock_get_engine.return_value = _mock_engine()
     _add_task(session, hours_until_due=200, raw_hash="far1")
 
-    count = check_no_work_alerts(session)
+    count = await check_no_work_alerts(session)
     assert count == 0
 
 
-@patch("deadline_agent.notifications.no_work_alerts.send_notification", return_value=True)
-def test_no_alert_for_past_due_tasks(mock_notify: object, session: Session) -> None:
+@pytest.mark.asyncio
+@patch("deadline_agent.reasoning.intervention_engine.get_intervention_engine")
+async def test_no_alert_for_past_due_tasks(mock_get_engine: object, session: Session) -> None:
+    mock_get_engine.return_value = _mock_engine()
     _add_task(session, hours_until_due=-5, raw_hash="past1")
 
-    count = check_no_work_alerts(session)
+    count = await check_no_work_alerts(session)
     assert count == 0
 
 
-@patch("deadline_agent.notifications.no_work_alerts.send_notification", return_value=True)
-def test_sets_no_work_alert_sent_flag(mock_notify: object, session: Session) -> None:
+@pytest.mark.asyncio
+@patch("deadline_agent.reasoning.intervention_engine.get_intervention_engine")
+async def test_sets_no_work_alert_sent_flag(mock_get_engine: object, session: Session) -> None:
+    mock_get_engine.return_value = _mock_engine()
     task = _add_task(session, hours_until_due=48)
 
-    check_no_work_alerts(session)
+    await check_no_work_alerts(session)
     session.refresh(task)
     assert task.no_work_alert_sent is True
 
 
-@patch("deadline_agent.notifications.no_work_alerts.send_notification", return_value=True)
-def test_multiple_tasks(mock_notify: object, session: Session) -> None:
+@pytest.mark.asyncio
+@patch("deadline_agent.reasoning.intervention_engine.get_intervention_engine")
+async def test_multiple_tasks(mock_get_engine: object, session: Session) -> None:
+    mock_get_engine.return_value = _mock_engine()
     _add_task(session, hours_until_due=24, raw_hash="t1")
     _add_task(session, hours_until_due=48, raw_hash="t2", title="Lab 5", course="Math 200")
     task_with_work = _add_task(session, hours_until_due=48, raw_hash="t3", title="Quiz Prep")
     _add_linked_activity(session, task_with_work)
 
-    count = check_no_work_alerts(session)
+    count = await check_no_work_alerts(session)
     assert count == 2  # Two tasks without work

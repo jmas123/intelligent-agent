@@ -16,7 +16,7 @@ def test_record_activity_starts_session():
     state = AmbientState(idle_threshold_minutes=30)
     now = datetime.now(UTC)
 
-    session_started, prev_mode = state.record_activity("project", now)
+    session_started, prev_mode, _ = state.record_activity("project", now)
     assert session_started is True
     assert prev_mode is None
     assert state.session_active is True
@@ -29,7 +29,7 @@ def test_subsequent_activity_no_session_start():
 
     state.record_activity("project", now)
     # Second activity 5 min later
-    session_started, _ = state.record_activity("project", now + timedelta(minutes=5))
+    session_started, _, _ = state.record_activity("project", now + timedelta(minutes=5))
     assert session_started is False
 
 
@@ -38,7 +38,7 @@ def test_context_switch_detected():
     now = datetime.now(UTC)
 
     state.record_activity("school", now)
-    _, prev_mode = state.record_activity("recruiting", now + timedelta(minutes=5))
+    _, prev_mode, _ = state.record_activity("recruiting", now + timedelta(minutes=5))
     assert prev_mode == "school"
     assert state.current_mode == "recruiting"
 
@@ -48,7 +48,7 @@ def test_no_switch_same_mode():
     now = datetime.now(UTC)
 
     state.record_activity("school", now)
-    _, prev_mode = state.record_activity("school", now + timedelta(minutes=5))
+    _, prev_mode, _ = state.record_activity("school", now + timedelta(minutes=5))
     assert prev_mode is None
 
 
@@ -96,6 +96,6 @@ def test_session_restart_after_idle():
     state.reset_session()
 
     # New activity after idle
-    session_started, _ = state.record_activity("recruiting", now)
+    session_started, _, _ = state.record_activity("recruiting", now)
     assert session_started is True
     assert state.current_mode == "recruiting"

@@ -335,6 +335,43 @@ class Relationship(Base):
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
 
 
+class PriorityRanking(Base):
+    """Ranked priority for a pending task. Recomputed periodically."""
+
+    __tablename__ = "priority_rankings"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"), unique=True)
+    rank: Mapped[int]  # 1 = highest priority
+    score: Mapped[float]  # 0.0-1.0 composite priority score
+    risk_if_ignored: Mapped[str]  # human-readable risk statement
+    suggested_action: Mapped[str]  # what to do next
+    reasoning: Mapped[str]  # why this rank
+    computed_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
+
+
+class TaskRisk(Base):
+    """Per-task risk assessment. Recomputed periodically."""
+
+    __tablename__ = "task_risks"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"), unique=True)
+    probability_of_missing: Mapped[float]  # 0.0-1.0
+    hours_needed: Mapped[float]  # estimated hours remaining
+    hours_available: Mapped[float]  # free calendar hours before deadline
+    hours_worked: Mapped[float] = mapped_column(default=0.0)  # hours already invested
+    confidence: Mapped[float]  # 0.0-1.0 — how much data backs this estimate
+    confidence_reason: Mapped[str] = mapped_column(default="")  # why confidence is low/high
+    risk_level: Mapped[str] = mapped_column(default="unknown")  # low | medium | high | critical
+    summary: Mapped[str] = mapped_column(default="")  # human-readable: "72% likely to miss unless..."
+    computed_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
+
+
 class EntityRelationship(Base):
     """Relationship between two knowledge entities."""
 
@@ -349,5 +386,62 @@ class EntityRelationship(Base):
     relationship_type: Mapped[str]  # teaches | works_at | enrolled_in | recruiter_for
     confidence: Mapped[float] = mapped_column(default=0.5)
     evidence_json: Mapped[str] = mapped_column(default="[]")  # JSON list of evidence snippets
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
+
+
+class InterventionRecord(Base):
+    """Log of every intervention decision (fired or suppressed)."""
+
+    __tablename__ = "intervention_records"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id"), default=None)
+    risk_level: Mapped[str]  # low | medium | high | critical
+    intervention_tier: Mapped[str]  # silent | menubar | notification | voice
+    category: Mapped[str]  # alert_24h | alert_2h | no_work | digest | recruiting | ...
+    title: Mapped[str]
+    body: Mapped[str]
+    fired: Mapped[bool]  # True = delivered, False = suppressed
+    suppression_reason: Mapped[str | None] = mapped_column(default=None)
+    escalated_from_id: Mapped[int | None] = mapped_column(
+        ForeignKey("intervention_records.id"), default=None
+    )
+    user_acted: Mapped[bool] = mapped_column(default=False)
+    user_acted_at: Mapped[datetime | None] = mapped_column(default=None)
+    response_value: Mapped[str | None] = mapped_column(default=None)  # yes | no (micro-confirmations)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class InterventionEscalation(Base):
+    """Pending escalation: an item that may upgrade tier if ignored."""
+
+    __tablename__ = "intervention_escalations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"))
+    original_record_id: Mapped[int] = mapped_column(ForeignKey("intervention_records.id"))
+    current_tier: Mapped[str]
+    next_tier: Mapped[str]
+    escalate_after: Mapped[datetime]
+    cancelled: Mapped[bool] = mapped_column(default=False)
+    cancelled_reason: Mapped[str | None] = mapped_column(default=None)
+    fired: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
+
+
+class DailyReconstruction(Base):
+    """Inferred daily activity timeline reconstructed from file activity, calendar, and email."""
+
+    __tablename__ = "daily_reconstructions"
+    __table_args__ = (UniqueConstraint("date"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    date: Mapped[str]  # YYYY-MM-DD
+    timeline_json: Mapped[str] = mapped_column(default="[]")  # JSON list of segment dicts
+    overall_confidence: Mapped[float] = mapped_column(default=0.0)
+    user_confirmed: Mapped[bool] = mapped_column(default=False)
+    narrative: Mapped[str] = mapped_column(default="")
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())

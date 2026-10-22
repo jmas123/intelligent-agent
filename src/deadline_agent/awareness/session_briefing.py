@@ -1,23 +1,28 @@
-"""Session briefing: auto-generate a concise briefing when work starts."""
+"""Session briefing event handler — Phase 32 entry point.
+
+Subscribes to SESSION_STARTED, asks the Phase 32 builder for a structured
+briefing, caches it for the session-end summary, and routes the rendered text
+through the intervention engine.
+"""
 
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
-from deadline_agent.events import SESSION_STARTED, Event, EventBus
-from deadline_agent.notifications.channels import (
-    Notification,
-    NotificationPriority,
-    notification_router,
+from deadline_agent.awareness.session_intelligence import (
+    build_session_briefing,
+    format_session_briefing,
+    remember_briefing,
 )
+from deadline_agent.events import SESSION_STARTED, Event, EventBus
 
 logger = logging.getLogger(__name__)
 
 
 class SessionBriefingGenerator:
-    """Generates a 30-second briefing when the user sits down to work.
+    """Produces a Phase 32 structured briefing on each session start.
 
-    Subscribes to SESSION_STARTED events and produces a concise summary
-    of what matters right now. Only fires once per idle-to-active transition.
+    Dedup: one briefing per unique session_started timestamp.
     """
 
     def __init__(self, session_factory: Any) -> None:
@@ -25,146 +30,112 @@ class SessionBriefingGenerator:
         self._last_briefing_session_ts: str | None = None
 
     def register(self, bus: EventBus) -> None:
-        """Subscribe to session start events."""
         bus.subscribe(SESSION_STARTED, self._on_session_started)
 
     async def _on_session_started(self, event: Event) -> None:
-        """Generate and deliver a session briefing."""
-        # Dedup: only one briefing per session start
         ts = event.payload.get("timestamp", "")
-        if ts == self._last_briefing_session_ts:
+        if ts and ts == self._last_briefing_session_ts:
             return
         self._last_briefing_session_ts = ts
 
+        life_track = event.payload.get("life_track")
+
         try:
             with self._session_factory() as session:
-                briefing = self._generate_briefing(
-                    session, event.payload.get("life_track")
+                briefing = await build_session_briefing(session, life_track=life_track)
+                if not briefing.priorities and not briefing.extras:
+                    return  # nothing worth interrupting for
+
+                if ts:
+                    remember_briefing(ts, briefing)
+
+                body = format_session_briefing(briefing)
+                from deadline_agent.reasoning.intervention_engine import (
+                    get_intervention_engine,
                 )
-                if briefing:
-                    # First line as LOW notification, full briefing as AMBIENT
-                    first_line = briefing.split(".")[0] + "."
-                    await notification_router.send(
-                        Notification(
-                            title="Session briefing",
-                            body=first_line,
-                            priority=NotificationPriority.LOW,
-                            category="briefing",
-                        )
-                    )
-                    # Full briefing to ambient queue
-                    if len(briefing) > len(first_line):
-                        await notification_router.send(
-                            Notification(
-                                title="Full briefing",
-                                body=briefing,
-                                priority=NotificationPriority.AMBIENT,
-                                category="briefing",
-                            )
-                        )
-                    logger.info("Session briefing generated")
+
+                engine = get_intervention_engine()
+                await engine.evaluate(
+                    session,
+                    task_id=None,
+                    risk_level="medium",
+                    category="briefing",
+                    title="Session briefing",
+                    body=body,
+                )
+                session.commit()
+                logger.info("Session briefing generated (%d priorities)", len(briefing.priorities))
         except Exception:
             logger.exception("Session briefing error")
 
-    def _generate_briefing(
-        self, session: Any, life_track: str | None
-    ) -> str | None:
-        """Build a concise briefing from current state."""
-        import json
-        from datetime import UTC, datetime, timedelta
+class SessionEndSummarizer:
+    """Produces a recap when the user steps away.
 
-        from sqlalchemy import func, select
+    Subscribes to SESSION_ENDED events emitted by the ambient state tracker
+    when an active session goes idle. Compares the cached briefing's
+    recommendation to what the user actually worked on.
+    """
 
-        from deadline_agent.models import Task
+    def __init__(self, session_factory: Any) -> None:
+        self._session_factory = session_factory
 
-        now = datetime.now(UTC)
-        parts: list[str] = []
+    def register(self, bus: EventBus) -> None:
+        from deadline_agent.events import SESSION_ENDED
 
-        # Active life context
+        bus.subscribe(SESSION_ENDED, self._on_session_ended)
+
+    async def _on_session_ended(self, event: Event) -> None:
+        from deadline_agent.awareness.session_intelligence import (
+            build_session_end_summary,
+            get_remembered_briefing,
+        )
+
+        started_iso = event.payload.get("session_started_at")
+        ended_iso = event.payload.get("session_ended_at")
+        if not started_iso:
+            return
+        briefing = get_remembered_briefing(started_iso)
+        if not briefing:
+            return
+
         try:
-            from deadline_agent.store.context_repository import (
-                LifeContextRepository,
+            started_at = datetime.fromisoformat(started_iso)
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=UTC)
+        except ValueError:
+            return
+
+        try:
+            ended_at = (
+                datetime.fromisoformat(ended_iso) if ended_iso else datetime.now(UTC)
             )
+            if ended_at.tzinfo is None:
+                ended_at = ended_at.replace(tzinfo=UTC)
+        except ValueError:
+            ended_at = datetime.now(UTC)
 
-            ctx_repo = LifeContextRepository(session)
-            active_contexts = ctx_repo.get_active()
-            if active_contexts:
-                ctx = active_contexts[0]
-                label = ctx.label or ctx.season.replace("_", " ")
-                parts.append(f"You're in {label}")
-        except Exception:
-            pass
-
-        # Overdue count
-        overdue_count = (
-            session.execute(
-                select(func.count(Task.id))
-                .where(Task.status == "pending")
-                .where(Task.due_date_iso < now.isoformat())
-                .where(Task.due_date_iso.is_not(None))
-            ).scalar()
-            or 0
-        )
-        if overdue_count > 0:
-            parts.append(f"{overdue_count} overdue")
-
-        # Due today count
-        end_of_today = (now + timedelta(days=1)).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
-        due_today = (
-            session.execute(
-                select(func.count(Task.id))
-                .where(Task.status == "pending")
-                .where(Task.due_date_iso >= now.isoformat())
-                .where(Task.due_date_iso < end_of_today.isoformat())
-            ).scalar()
-            or 0
-        )
-        if due_today > 0:
-            parts.append(f"{due_today} due today")
-
-        # Peak window timing
         try:
-            from deadline_agent.store.pattern_repository import PatternRepository
+            with self._session_factory() as session:
+                summary = build_session_end_summary(
+                    session, briefing, started_at, ended_at
+                )
+                if not summary:
+                    return
 
-            pattern_repo = PatternRepository(session)
-            peak_patterns = pattern_repo.get_by_type("peak_hours")
-            for p in peak_patterns:
-                data = json.loads(p.value)
-                if data.get("rank") == "primary":
-                    from zoneinfo import ZoneInfo
-
-                    _est = ZoneInfo("America/New_York")
-                    local_now = now.astimezone(_est)
-                    start_hour = int(data.get("start_hour", 0))
-                    minutes_until = start_hour * 60 - (
-                        local_now.hour * 60 + local_now.minute
-                    )
-                    if 0 < minutes_until <= 120:
-                        label = data.get("label", f"{start_hour}:00")
-                        parts.append(
-                            f"productive window ({label}) starts in {minutes_until} min"
-                        )
-                    break
-        except Exception:
-            pass
-
-        # Recruiting context if relevant
-        if life_track == "recruiting":
-            try:
-                from deadline_agent.store.recruiting_repository import (
-                    RecruitingRepository,
+                from deadline_agent.reasoning.intervention_engine import (
+                    get_intervention_engine,
                 )
 
-                repo = RecruitingRepository(session)
-                active = repo.list_active()
-                if active:
-                    parts.append(f"{len(active)} active application(s)")
-            except Exception:
-                pass
-
-        if not parts:
-            return None
-
-        return ". ".join(parts) + "."
+                engine = get_intervention_engine()
+                await engine.evaluate(
+                    session,
+                    task_id=None,
+                    risk_level="low",
+                    category="session_end",
+                    title="Session recap",
+                    body=summary,
+                )
+                session.commit()
+                logger.info("Session end summary delivered")
+        except Exception:
+            logger.exception("Session end summary error")

@@ -9,7 +9,9 @@ import rumps
 USER_TZ = ZoneInfo("America/New_York")
 
 from deadline_agent.store.action_repository import ActionRepository
+from deadline_agent.store.priority_repository import PriorityRepository
 from deadline_agent.store.repository import TaskRepository
+from deadline_agent.store.risk_repository import RiskRepository
 from deadline_agent.store.session import SessionLocal, init_db
 
 logger = logging.getLogger(__name__)
@@ -78,12 +80,44 @@ class DeadlineMenubarApp(rumps.App):  # type: ignore[misc]
                 self.menu.add(item)
             self.menu.add(rumps.separator)
 
-        self.menu.add(rumps.MenuItem("Upcoming Deadlines", callback=None))
-        self.menu.add(rumps.separator)
-
         with SessionLocal() as session:
             repo = TaskRepository(session)
+            p_repo = PriorityRepository(session)
+            r_repo = RiskRepository(session)
             tasks = repo.list_tasks(status="pending", limit=10)
+
+            # Build priority and risk lookup maps
+            priority_map: dict[int, int] = {}  # task_id -> rank
+            risk_map: dict[int, str] = {}  # task_id -> risk_level
+            risk_pct_map: dict[int, int] = {}  # task_id -> P(miss) %
+            for ranking, task_obj in p_repo.get_ranked(limit=10):
+                priority_map[task_obj.id] = ranking.rank
+            for risk, task_obj in r_repo.get_all_active():
+                risk_map[task_obj.id] = risk.risk_level
+                risk_pct_map[task_obj.id] = int(risk.probability_of_missing * 100)
+
+        # Sort tasks by priority rank (ranked first, then unranked by urgency)
+        def _sort_key(t: object) -> tuple[int, int]:
+            rank = priority_map.get(t.id, 999)  # type: ignore[union-attr]
+            return (rank, -t.urgency_score)  # type: ignore[union-attr]
+
+        tasks.sort(key=_sort_key)
+
+        # Top priority header
+        if tasks and tasks[0].id in priority_map:
+            top = tasks[0]
+            top_due = _relative_due(top.due_date_iso)
+            risk_tag = ""
+            if top.id in risk_pct_map:
+                risk_tag = f" [{risk_pct_map[top.id]}% risk]"
+            self.menu.add(rumps.MenuItem(
+                f"#1 Priority: {top.title} — {top_due}{risk_tag}",
+                callback=None,
+            ))
+            self.menu.add(rumps.separator)
+
+        self.menu.add(rumps.MenuItem("Upcoming Deadlines", callback=None))
+        self.menu.add(rumps.separator)
 
         if not tasks:
             self.menu.add(rumps.MenuItem("No pending tasks", callback=None))
@@ -91,9 +125,13 @@ class DeadlineMenubarApp(rumps.App):  # type: ignore[misc]
         else:
             self.title = f"DA ({len(tasks)})"
             for task in tasks:
-                urgency = "!" * task.urgency_score
+                # Build label with priority rank and risk
+                rank = priority_map.get(task.id)
+                rank_prefix = f"#{rank} " if rank else ""
+                risk_level = risk_map.get(task.id, "")
+                risk_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡"}.get(risk_level, "")
                 due = _relative_due(task.due_date_iso)
-                label = f"{urgency} {task.title} — {due}"
+                label = f"{rank_prefix}{risk_icon}{task.title} — {due}"
 
                 item = rumps.MenuItem(label)
                 item.add(

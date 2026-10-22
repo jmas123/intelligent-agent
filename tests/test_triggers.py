@@ -1,7 +1,7 @@
 """Tests for compound trigger engine and activity baseline."""
 
 from datetime import UTC, datetime, timedelta
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -42,6 +42,12 @@ def trigger_eng(session, bus):
     eng = CompoundTriggerEngine(FakeFactory(session))
     eng.register(bus)
     return eng
+
+
+def _mock_engine():
+    engine = AsyncMock()
+    engine.evaluate = AsyncMock()
+    return engine
 
 
 class TestActivityBaseline:
@@ -123,50 +129,59 @@ class TestActivityBaseline:
 
 class TestCompoundTriggerEngine:
     @pytest.mark.asyncio
-    async def test_recruiting_notification(self, bus, trigger_eng):
-        """Recruiting status change sends notification."""
-        with patch(
-            "deadline_agent.triggers.send_notification"
-        ) as mock_notify:
-            await bus.emit(
-                Event(
-                    type=RECRUITING_STATUS_CHANGED,
-                    payload={
-                        "company": "Google",
-                        "old_status": "applied",
-                        "new_status": "interview",
-                        "subject": "Interview invite",
-                        "app_id": 1,
-                    },
-                )
-            )
-            mock_notify.assert_called_once()
-            assert "Google" in mock_notify.call_args.kwargs["title"]
+    @patch("deadline_agent.reasoning.intervention_engine.get_intervention_engine")
+    async def test_recruiting_notification(self, mock_get_engine, bus, trigger_eng):
+        """Recruiting status change sends notification via intervention engine."""
+        mock_engine = _mock_engine()
+        mock_get_engine.return_value = mock_engine
 
-    @pytest.mark.asyncio
-    async def test_recruiting_dedup(self, bus, trigger_eng):
-        """Same recruiting notification not sent twice in one day."""
-        with patch(
-            "deadline_agent.triggers.send_notification"
-        ) as mock_notify:
-            event = Event(
+        await bus.emit(
+            Event(
                 type=RECRUITING_STATUS_CHANGED,
                 payload={
                     "company": "Google",
+                    "old_status": "applied",
                     "new_status": "interview",
-                    "subject": "Test",
+                    "subject": "Interview invite",
                     "app_id": 1,
                 },
             )
-            await bus.emit(event)
-            await bus.emit(event)
-            assert mock_notify.call_count == 1
+        )
+        mock_engine.evaluate.assert_called_once()
+        call_kwargs = mock_engine.evaluate.call_args.kwargs
+        assert "Google" in call_kwargs["title"]
+        assert call_kwargs["risk_level"] == "high"
+        assert call_kwargs["category"] == "recruiting"
 
     @pytest.mark.asyncio
+    @patch("deadline_agent.reasoning.intervention_engine.get_intervention_engine")
+    async def test_recruiting_dedup(self, mock_get_engine, bus, trigger_eng):
+        """Same recruiting notification not sent twice in one day."""
+        mock_engine = _mock_engine()
+        mock_get_engine.return_value = mock_engine
+
+        event = Event(
+            type=RECRUITING_STATUS_CHANGED,
+            payload={
+                "company": "Google",
+                "new_status": "interview",
+                "subject": "Test",
+                "app_id": 1,
+            },
+        )
+        await bus.emit(event)
+        await bus.emit(event)
+        assert mock_engine.evaluate.call_count == 1
+
+    @pytest.mark.asyncio
+    @patch("deadline_agent.reasoning.intervention_engine.get_intervention_engine")
     async def test_deadline_cluster_with_drop(
-        self, session, bus, trigger_eng
+        self, mock_get_engine, session, bus, trigger_eng
     ):
         """Cluster trigger fires when deadlines + activity drop."""
+        mock_engine = _mock_engine()
+        mock_get_engine.return_value = mock_engine
+
         now = datetime.now(UTC)
         for i in range(3):
             task = Task(
@@ -184,28 +199,30 @@ class TestCompoundTriggerEngine:
 
         trigger_eng.activity_baseline._dropped = True
 
-        with patch(
-            "deadline_agent.triggers.send_notification"
-        ) as mock_notify:
-            await bus.emit(
-                Event(
-                    type=TASK_CREATED,
-                    payload={
-                        "task_id": 1,
-                        "title": "T",
-                        "source": "gmail",
-                    },
-                )
+        await bus.emit(
+            Event(
+                type=TASK_CREATED,
+                payload={
+                    "task_id": 1,
+                    "title": "T",
+                    "source": "gmail",
+                },
             )
-            mock_notify.assert_called_once()
-            assert "3" in mock_notify.call_args.kwargs["body"]
-            assert "dropped" in mock_notify.call_args.kwargs["body"]
+        )
+        mock_engine.evaluate.assert_called_once()
+        call_kwargs = mock_engine.evaluate.call_args.kwargs
+        assert "3" in call_kwargs["body"]
+        assert "dropped" in call_kwargs["body"]
 
     @pytest.mark.asyncio
+    @patch("deadline_agent.reasoning.intervention_engine.get_intervention_engine")
     async def test_no_cluster_without_drop(
-        self, session, bus, trigger_eng
+        self, mock_get_engine, session, bus, trigger_eng
     ):
         """Cluster trigger does NOT fire without activity drop."""
+        mock_engine = _mock_engine()
+        mock_get_engine.return_value = mock_engine
+
         now = datetime.now(UTC)
         for i in range(3):
             task = Task(
@@ -223,17 +240,14 @@ class TestCompoundTriggerEngine:
 
         trigger_eng.activity_baseline._dropped = False
 
-        with patch(
-            "deadline_agent.triggers.send_notification"
-        ) as mock_notify:
-            await bus.emit(
-                Event(
-                    type=TASK_CREATED,
-                    payload={
-                        "task_id": 1,
-                        "title": "T",
-                        "source": "gmail",
-                    },
-                )
+        await bus.emit(
+            Event(
+                type=TASK_CREATED,
+                payload={
+                    "task_id": 1,
+                    "title": "T",
+                    "source": "gmail",
+                },
             )
-            mock_notify.assert_not_called()
+        )
+        mock_engine.evaluate.assert_not_called()

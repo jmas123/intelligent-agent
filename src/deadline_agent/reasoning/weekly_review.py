@@ -179,7 +179,9 @@ async def generate_weekly_review(session: Session) -> str:
     except ExtractionError:
         if settings.use_anthropic_fallback and settings.anthropic_api_key:
             try:
-                result = await _call_anthropic(WEEKLY_REVIEW_PROMPT, stats_text)
+                result = await _call_anthropic(
+                    WEEKLY_REVIEW_PROMPT, stats_text, model=settings.anthropic_light_model,
+                )
             except ExtractionError:
                 pass
 
